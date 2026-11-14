@@ -58,6 +58,7 @@ export const DatabaseManagerModal: React.FC<DatabaseManagerModalProps> = ({
 
   // Drag and Drop State
   const [isDraggingOver, setIsDraggingOver] = useState<boolean>(false);
+  const [isProcessingFile, setIsProcessingFile] = useState<boolean>(false);
   const dragCounterRef = useRef<number>(0);
 
   // Staged Upload State
@@ -89,6 +90,7 @@ export const DatabaseManagerModal: React.FC<DatabaseManagerModalProps> = ({
     setEditingDbId(null);
     setEditingName('');
     setIsDraggingOver(false);
+    setIsProcessingFile(false);
   }, [isOpen]);
 
   // Prevent background scrolling when modal is open
@@ -112,6 +114,11 @@ export const DatabaseManagerModal: React.FC<DatabaseManagerModalProps> = ({
     if (!file) return;
 
     if (file.name.toLowerCase().endsWith('.zip')) {
+      setIsProcessingFile(true);
+      setFeedback(null);
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => setTimeout(resolve, 0))
+      );
       try {
         const imported = await importQuestionBankFromZip(file);
         const analysis = analyzeQuestionBankForNaming(
@@ -140,6 +147,8 @@ export const DatabaseManagerModal: React.FC<DatabaseManagerModalProps> = ({
           type: 'error',
           message: errorMsg || 'Falha ao processar pacote .zip.',
         });
+      } finally {
+        setIsProcessingFile(false);
       }
       return;
     }
@@ -481,6 +490,21 @@ export const DatabaseManagerModal: React.FC<DatabaseManagerModalProps> = ({
             </div>
           )}
           
+          {/* Processing File State */}
+          {isProcessingFile && (
+            <div className="p-4 rounded-xl bg-surface-subtle border border-border flex items-center gap-3 text-xs text-primary animate-in fade-in duration-150">
+              <RefreshCw className="w-4 h-4 text-accent animate-spin shrink-0" />
+              <div className="min-w-0">
+                <p className="font-semibold text-primary">
+                  Processando pacote de prova e mídias...
+                </p>
+                <p className="text-[11px] text-secondary mt-0.5">
+                  Descompactando questões e preparando armazenamento local sem travar a tela.
+                </p>
+              </div>
+            </div>
+          )}
+
           {/* SECTION A: STAGED UPLOAD & NAMING */}
           {stagedUpload ? (
             <div className="p-4 bg-accent-subtle border border-accent/30 rounded-xl space-y-3.5 animate-in fade-in slide-in-from-top-2 duration-200">

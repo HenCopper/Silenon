@@ -44,6 +44,8 @@ import {
   getOrchestratorDebugSnapshot,
   clearOrchestratorDebugLogs,
   recordOrchestratorRuntimeError,
+  generateDynamicStriveSuggestions,
+  getCachedStriveSuggestions,
 } from '../lib/aiOrchestrator';
 import {
   getUnanalyzedQuestionThreads,
@@ -123,6 +125,9 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
   const [rpmStatusNotice, setRpmStatusNotice] = useState<string | null>(null);
   const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
+  const [striveSuggestions, setStriveSuggestions] = useState<string[]>(() =>
+    getCachedStriveSuggestions(answers)
+  );
 
   const chatEndRef = useRef<HTMLDivElement | null>(null);
   const chatScrollContainerRef = useRef<HTMLDivElement | null>(null);
@@ -207,6 +212,27 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
     });
     getAllQuestionThreads().then(setAllThreads);
   }, [isOpen]);
+
+  // Carrega sugestões do cache local imediatamente e atualiza em segundo plano via Groq quando houver novas respostas
+  useEffect(() => {
+    setStriveSuggestions(getCachedStriveSuggestions(answers));
+    if (!isOpen || chatMessages.length > 0) return;
+
+    let cancelled = false;
+    generateDynamicStriveSuggestions(answers, questions, stats)
+      .then((fresh) => {
+        if (!cancelled && Array.isArray(fresh) && fresh.length === 3) {
+          setStriveSuggestions(fresh);
+        }
+      })
+      .catch(() => {
+        // Mantém sugestões do cache/fallback silenciosamente
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, chatMessages.length, answers, questions, stats.total_answered]);
 
   // Close liquid popover on click outside
   useEffect(() => {
@@ -948,18 +974,13 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
                     {chatMessages.length === 0 ? (
                       <div className="w-[calc(100%-6rem)] sm:w-[calc(100%-7rem)] p-5 sm:p-6 rounded-2xl bg-surface border border-border space-y-3.5 shadow-xs">
                         <div className="flex items-center gap-2 text-xs sm:text-sm font-bold text-primary">
-                          <Sparkles className="w-4 h-4 text-accent" />
                           <span>Bem-vindo ao Modo Strive!</span>
                         </div>
                         <p className="text-xs sm:text-sm text-secondary leading-relaxed">
                           Estou acompanhando seu histórico em tempo real ({stats.total_answered} questões resolvidas). Pergunte sobre estratégias de tempo para Matemática e Ciências da Natureza, revisão rápida de fórmulas ou converse comigo para organizar seus estudos.
                         </p>
                         <div className="flex flex-wrap gap-2 pt-1">
-                          {[
-                            'Como organizar meu ritmo de estudo e controle de tempo para domingo?',
-                            'Quais são as questões fundamentais que mais caem em Matemática e Natureza?',
-                            'Analise meu progresso recente e me diga no que focar hoje.',
-                          ].map((suggestion, idx) => (
+                          {striveSuggestions.map((suggestion, idx) => (
                             <button
                               key={idx}
                               type="button"

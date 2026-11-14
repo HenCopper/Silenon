@@ -7,6 +7,7 @@ interface SmartQuestionImageProps {
   alt?: string;
   source?: string;
   className?: string;
+  lazy?: boolean;
 }
 
 export const SmartQuestionImage: React.FC<SmartQuestionImageProps> = ({
@@ -14,6 +15,7 @@ export const SmartQuestionImage: React.FC<SmartQuestionImageProps> = ({
   alt = 'Material visual da questão',
   source,
   className = 'max-h-96 w-auto mx-auto rounded object-contain',
+  lazy = false,
 }) => {
   const filterId = useId().replace(/:/g, '');
   const imgRef = useRef<HTMLImageElement | null>(null);
@@ -192,6 +194,8 @@ export const SmartQuestionImage: React.FC<SmartQuestionImageProps> = ({
         ref={imgRef}
         src={src}
         alt={alt}
+        decoding="async"
+        loading={lazy ? 'lazy' : 'eager'}
         data-smart-image="true"
         crossOrigin={useCors ? 'anonymous' : undefined}
         referrerPolicy="no-referrer"
@@ -234,6 +238,7 @@ export const SmartQuestionImage: React.FC<SmartQuestionImageProps> = ({
                 <img
                   src={src}
                   alt={alt}
+                  decoding="async"
                   data-smart-image="true"
                   referrerPolicy="no-referrer"
                   className="max-h-[75dvh] w-auto max-w-full mx-auto object-contain rounded"

@@ -133,7 +133,7 @@ const GlossaryTermSpan: React.FC<GlossaryTermSpanProps> = ({
             }}
             onMouseEnter={() => setIsHovered(true)}
             onMouseLeave={() => setIsHovered(false)}
-            className="fixed bg-surface border border-border shadow-lg rounded-xl p-2.5 text-xs text-primary z-50 max-w-xs leading-relaxed font-normal not-italic"
+            className="fixed bg-surface border border-border text-primary shadow-xl rounded-xl p-2.5 text-xs z-50 max-w-xs leading-relaxed font-normal not-italic"
           >
             <span className="font-bold text-primary block mb-0.5">{term}</span>
             <span className="text-secondary block">{definition}</span>
@@ -184,14 +184,14 @@ function extractGlossaryFromMarkdown(rawMarkdown: string): {
   };
 
   // 1. Extrai blocos fechados ```glossario ... ``` ou ```glossary ... ```
-  const closedFenceRegex = /```(?:glossario|glossary)[ \t]*\r?\n([\s\S]*?)```/gi;
+  const closedFenceRegex = /```(?:glossario|glossary)\b[ \t]*\r?\n?([\s\S]*?)```/gi;
   let cleaned = rawMarkdown.replace(closedFenceRegex, (_fullMatch, innerJson: string) => {
     parseAndCollect(innerJson);
     return '';
   });
 
   // 2. Remove bloco ```glossario ou ```glossary ainda aberto no final durante streaming
-  const openFenceRegex = /```(?:glossario|glossary)[ \t]*(?:\r?\n([\s\S]*))?$/i;
+  const openFenceRegex = /```(?:glossario|glossary)\b[ \t]*(?:\r?\n?([\s\S]*))?$/i;
   cleaned = cleaned.replace(openFenceRegex, (_fullMatch, partialJson?: string) => {
     if (partialJson) {
       parseAndCollect(partialJson);

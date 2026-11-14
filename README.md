@@ -1,8 +1,8 @@
-# Memoriz
+# Silenon — Simples no silício
 
 > *"Se a tecnologia não é capaz de abençoar a todos, então ela não pode salvar o mundo."*
 
-O **Memoriz** é um aplicativo web leve e gratuito para resolução de questões e revisão por repetição espaçada (SRS). 
+O **Silenon** (*Simples no silício*) é um aplicativo web leve e gratuito para resolução de questões e revisão por repetição espaçada (SRS). 
 
 Ele foi feito para quem quer uma ferramenta de estudos rápida, sem propagandas, sem travas pagas e que funcione direto no navegador — inclusive em celulares, tablets antigos ou computadores mais básicos, sem engasgar e sem depender de internet para rodar.
 
@@ -12,7 +12,7 @@ Ele foi feito para quem quer uma ferramenta de estudos rápida, sem propagandas,
 
 * **Funciona 100% Offline (PWA):** Você pode instalar no celular ou computador e usar mesmo sem conexão à internet. O aplicativo e os bancos de questões ficam salvos no próprio aparelho.
 * **Seus dados ficam com você:** Não precisa criar conta ou pagar assinatura para usar. Seu progresso, histórico e notas são seus e não saem do seu dispositivo, a menos que você queira sincronizar com o Google.
-* **Importação Rápida de Questões:** Você pode criar seus próprios bancos de questões em formato JSON (gerando por IA, extraindo de provas ou digitando) e simplesmente arrastar o arquivo para dentro do app.
+* **Importação Rápida de Questões (`.json` e `.zip`):** Você pode criar seus próprios bancos de questões em formato `.json` ou pacotes `.zip` (gerando por IA, extraindo de provas ou digitando) e simplesmente arrastar o arquivo para dentro do app.
 * **Modo Prática:** Resolva questões no seu tempo, com opção de riscar alternativas descartadas (clique direito ou deslizando o dedo), cronômetro, anotações pessoais e gabarito comentado.
 * **Repetição Espaçada (SRS):** Algoritmo que calcula automaticamente a melhor data para você rever cada assunto antes de esquecer.
 * **Caderno de Erros Automático:** Todas as questões que você errar ficam salvas em uma área própria para você treinar até acertar.
@@ -21,7 +21,7 @@ Ele foi feito para quem quer uma ferramenta de estudos rápida, sem propagandas,
 
 ---
 
-Qualquer matéria, prova ou questionário pode ser usado no Memoriz. O formato básico é um arquivo `.json` simples, conforme o schema definido em [`src/types/question.ts`](./src/types/question.ts). Basta arrastar o arquivo para o Gerenciador de Bancos dentro do app para começar a praticar.
+Qualquer matéria, prova ou questionário pode ser usado no **Silenon**. O formato básico é um arquivo `.json` simples ou pacote `.zip` com múltiplos bancos/imagens, conforme o schema definido em [`src/types/question.ts`](./src/types/question.ts). Basta arrastar o arquivo para o Gerenciador de Bancos dentro do app para começar a praticar.
 
 ---
 
@@ -32,8 +32,8 @@ Caso queira clonar e rodar o projeto no seu computador:
 1. Tenha o **Node.js** (versão 18 ou superior) instalado.
 2. Clone o repositório:
    ```bash
-   git clone https://github.com/Syuliskav/Memoriz-site.git
-   cd Memoriz-site
+   git clone https://github.com/Syuliskav/Silenon-site.git
+   cd Silenon-site
    ```
 3. Instale as dependências:
    ```bash
@@ -49,7 +49,7 @@ Caso queira clonar e rodar o projeto no seu computador:
 
 ## Desenvolvimento & Mantenedor
 
-O desenvolvimento, a arquitetura de estado e os aprimoramentos de interface contam com a assistência contínua de modelos Gemini da Google. O mantenedor do projeto é o autor de [Syuliskav/Memoriz-site](https://github.com/Syuliskav/Memoriz-site).
+O desenvolvimento, a arquitetura de estado e os aprimoramentos de interface do **Silenon** contam com a assistência contínua de modelos Gemini da Google. O mantenedor do projeto é o autor de [Syuliskav](https://github.com/Syuliskav).
 
 ---
 

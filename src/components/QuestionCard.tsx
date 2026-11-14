@@ -26,8 +26,11 @@ import { getMasteryPercentage, getMasteryBadge } from '../lib/srsEngine';
 import { ResolutionSection } from './ResolutionSection';
 import { QuestionMediaRenderer } from './QuestionMediaRenderer';
 import { QuestionVoiceBar } from './QuestionVoiceBar';
-import { BYOKModal } from './BYOKModal';
 import { DisableTipsModal, useTipsPreference } from './DisableTipsModal';
+
+const LazyBYOKModal = React.lazy(() =>
+  import('./BYOKModal').then((m) => ({ default: m.BYOKModal }))
+);
 
 export const DEFAULT_ELIMINATED_OPTIONS_EXPIRATION_MS = 4 * 60 * 60 * 1000; // 4 horas em milissegundos
 
@@ -936,11 +939,13 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
         }}
       />
 
-      {!onOpenAIAssistant && (
-        <BYOKModal
-          isOpen={isLocalBYOKOpen}
-          onClose={() => setIsLocalBYOKOpen(false)}
-        />
+      {!onOpenAIAssistant && isLocalBYOKOpen && (
+        <React.Suspense fallback={null}>
+          <LazyBYOKModal
+            isOpen={isLocalBYOKOpen}
+            onClose={() => setIsLocalBYOKOpen(false)}
+          />
+        </React.Suspense>
       )}
 
       <DisableTipsModal

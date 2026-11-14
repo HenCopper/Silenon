@@ -177,7 +177,7 @@ export default defineConfig(() => {
       react(),
       tailwindcss(),
       {
-        name: 'memoriz-api-endpoints',
+        name: 'silenon-api-endpoints',
         configureServer(server) {
           server.middlewares.use('/api/diagnostic-report', (req, res) => {
             if (req.method === 'POST') {

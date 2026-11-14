@@ -15,28 +15,55 @@ import { useUserAccount } from './hooks/useUserAccount';
 import { useStudyData } from './hooks/useStudyData';
 import { useModals } from './hooks/useModals';
 
-// UI Components
+// Core Eager UI Components (Practice Mode Shell)
 import { Header } from './components/Header';
 import { Sidebar } from './components/Sidebar';
 import { QuestionCard } from './components/QuestionCard';
 import { AssociatedContextPanel } from './components/AssociatedContextPanel';
-import { SRSModeView } from './components/SRSModeView';
-import { SimuladoView } from './components/SimuladoView';
-import { ErrorNotebookView } from './components/ErrorNotebookView';
-import { MetricsDashboard } from './components/MetricsDashboard';
-import { DatabaseManagerModal } from './components/DatabaseManagerModal';
-import { KeyboardShortcutsModal } from './components/KeyboardShortcutsModal';
-import { AppInfoModal } from './components/AppInfoModal';
 import { PauseOverlay } from './components/PauseOverlay';
-import { UserAccountModal } from './components/UserAccountModal';
-import { ThemeKitchenSink } from './components/ThemeKitchenSink';
-import { XPPerformanceModal } from './components/XPPerformanceModal';
 import { CarouselDiagnosticOverlay } from './components/CarouselDiagnosticOverlay';
 import { DraggableModeSwitcher } from './components/DraggableModeSwitcher';
-import { BYOKModal } from './components/BYOKModal';
-import { GlobalAssistantPopover } from './components/GlobalAssistantPopover';
 import { hasAnyAIKey } from './lib/aiOrchestrator';
 import { syncWindow } from './lib/mediaWindowCache';
+
+// Lazy-loaded Secondary Views & Modals (Code Splitting)
+const loadSRSModeView = () =>
+  import('./components/SRSModeView').then((m) => ({ default: m.SRSModeView }));
+const loadSimuladoView = () =>
+  import('./components/SimuladoView').then((m) => ({ default: m.SimuladoView }));
+const loadErrorNotebookView = () =>
+  import('./components/ErrorNotebookView').then((m) => ({ default: m.ErrorNotebookView }));
+const loadMetricsDashboard = () =>
+  import('./components/MetricsDashboard').then((m) => ({ default: m.MetricsDashboard }));
+const loadDatabaseManagerModal = () =>
+  import('./components/DatabaseManagerModal').then((m) => ({ default: m.DatabaseManagerModal }));
+const loadKeyboardShortcutsModal = () =>
+  import('./components/KeyboardShortcutsModal').then((m) => ({ default: m.KeyboardShortcutsModal }));
+const loadAppInfoModal = () =>
+  import('./components/AppInfoModal').then((m) => ({ default: m.AppInfoModal }));
+const loadUserAccountModal = () =>
+  import('./components/UserAccountModal').then((m) => ({ default: m.UserAccountModal }));
+const loadThemeKitchenSink = () =>
+  import('./components/ThemeKitchenSink').then((m) => ({ default: m.ThemeKitchenSink }));
+const loadXPPerformanceModal = () =>
+  import('./components/XPPerformanceModal').then((m) => ({ default: m.XPPerformanceModal }));
+const loadBYOKModal = () =>
+  import('./components/BYOKModal').then((m) => ({ default: m.BYOKModal }));
+const loadGlobalAssistantPopover = () =>
+  import('./components/GlobalAssistantPopover').then((m) => ({ default: m.GlobalAssistantPopover }));
+
+const SRSModeView = React.lazy(loadSRSModeView);
+const SimuladoView = React.lazy(loadSimuladoView);
+const ErrorNotebookView = React.lazy(loadErrorNotebookView);
+const MetricsDashboard = React.lazy(loadMetricsDashboard);
+const DatabaseManagerModal = React.lazy(loadDatabaseManagerModal);
+const KeyboardShortcutsModal = React.lazy(loadKeyboardShortcutsModal);
+const AppInfoModal = React.lazy(loadAppInfoModal);
+const UserAccountModal = React.lazy(loadUserAccountModal);
+const ThemeKitchenSink = React.lazy(loadThemeKitchenSink);
+const XPPerformanceModal = React.lazy(loadXPPerformanceModal);
+const BYOKModal = React.lazy(loadBYOKModal);
+const GlobalAssistantPopover = React.lazy(loadGlobalAssistantPopover);
 
 export default function App() {
   // Verificação de ambiente local de desenvolvimento (sem dados pessoais ou e-mails hardcoded)
@@ -175,6 +202,44 @@ export default function App() {
       syncWindow(filteredQuestions, currentIndex);
     }
   }, [currentMode, filteredQuestions, currentIndex]);
+
+  // Idle Prefetching of primary secondary chunks after Practice Mode mounts
+  const [shouldMountSecondarySlides, setShouldMountSecondarySlides] = React.useState(false);
+
+  React.useEffect(() => {
+    if (currentMode !== 'practice' || isDragging || isModeTransitioning) {
+      setShouldMountSecondarySlides(true);
+    }
+  }, [currentMode, isDragging, isModeTransitioning]);
+
+  React.useEffect(() => {
+    const prefetchChunks = () => {
+      void loadGlobalAssistantPopover();
+      void loadDatabaseManagerModal();
+      void loadSimuladoView();
+      void loadMetricsDashboard();
+      void loadSRSModeView();
+      void loadErrorNotebookView();
+      setShouldMountSecondarySlides(true);
+    };
+
+    const win = window as Window & {
+      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+      cancelIdleCallback?: (id: number) => void;
+    };
+
+    if (typeof win.requestIdleCallback === 'function') {
+      const idleId = win.requestIdleCallback(prefetchChunks, { timeout: 1500 });
+      return () => {
+        if (typeof win.cancelIdleCallback === 'function') {
+          win.cancelIdleCallback(idleId);
+        }
+      };
+    }
+
+    const timerId = window.setTimeout(prefetchChunks, 1200);
+    return () => window.clearTimeout(timerId);
+  }, []);
 
   return (
     <div className="w-full h-[100vh] h-[100dvh] overflow-hidden flex flex-col">
@@ -389,15 +454,19 @@ export default function App() {
                     }}
                   >
                     <div className="max-w-7xl mx-auto w-full">
-                      <SRSModeView
-                        questions={questions}
-                        srsItems={srsItems}
-                        isPaused={isSRSTimerPaused}
-                        onSaveSRS={handleSaveSRSFromView}
-                        onRecordAnswer={handleRecordSRSAnswer}
-                        streakDays={stats.streak_days}
-                        onExit={() => handleSelectMode('practice')}
-                      />
+                      {(shouldMountSecondarySlides || currentMode === 'srs') && (
+                        <React.Suspense fallback={null}>
+                          <SRSModeView
+                            questions={questions}
+                            srsItems={srsItems}
+                            isPaused={isSRSTimerPaused}
+                            onSaveSRS={handleSaveSRSFromView}
+                            onRecordAnswer={handleRecordSRSAnswer}
+                            streakDays={stats.streak_days}
+                            onExit={() => handleSelectMode('practice')}
+                          />
+                        </React.Suspense>
+                      )}
                     </div>
                   </div>
 
@@ -416,46 +485,50 @@ export default function App() {
                     }}
                   >
                     <div className="max-w-7xl mx-auto w-full">
-                      <ErrorNotebookView
-                        questions={questions}
-                        lastAnswers={lastAnswerMap}
-                        onStartPracticeQuestion={(q) => {
-                          setFilters({
-                            database_id: 'all',
-                            subject: 'all',
-                            exam_board: 'all',
-                            year: 'all',
-                            topic: 'all',
-                            status: 'wrong',
-                            searchQuery: '',
-                          });
-                          handleSelectMode('practice');
-                          const targetHash = getQuestionContentHash(q);
-                          const idx = filteredQuestions.findIndex(
-                            (item) =>
-                              item.sequence_id === q.sequence_id ||
-                              getQuestionContentHash(item) === targetHash
-                          );
-                          setCurrentIndex(idx >= 0 ? idx : 0);
-                          scrollPracticeSlideToTop();
-                        }}
-                        onExit={() => handleSelectMode('practice')}
-                        onAnswerQuestion={handleAnswer}
-                        srsItems={srsItems}
-                        onRateSRS={handleRateSRS}
-                        bookmarks={bookmarks}
-                        onToggleBookmark={handleToggleBookmark}
-                        onSaveNote={handleSaveNote}
-                        strikes={strikes}
-                        onToggleStrike={handleToggleStrike}
-                        onSetStrikes={handleSetStrikes}
-                        isPaused={isErrorTimerPaused}
-                        isPageSettled={
-                          currentMode === 'error_notebook' &&
-                          !modeDragProgress?.isDragging &&
-                          !isModeTransitioning
-                        }
-                      />
+                      {(shouldMountSecondarySlides || currentMode === 'error_notebook') && (
+                        <React.Suspense fallback={null}>
+                          <ErrorNotebookView
+                            questions={questions}
+                            lastAnswers={lastAnswerMap}
+                            onStartPracticeQuestion={(q) => {
+                              setFilters({
+                                database_id: 'all',
+                                subject: 'all',
+                                exam_board: 'all',
+                                year: 'all',
+                                topic: 'all',
+                                status: 'wrong',
+                                searchQuery: '',
+                              });
+                              handleSelectMode('practice');
+                              const targetHash = getQuestionContentHash(q);
+                              const idx = filteredQuestions.findIndex(
+                                (item) =>
+                                  item.sequence_id === q.sequence_id ||
+                                  getQuestionContentHash(item) === targetHash
+                              );
+                              setCurrentIndex(idx >= 0 ? idx : 0);
+                              scrollPracticeSlideToTop();
+                            }}
+                            onExit={() => handleSelectMode('practice')}
+                            onAnswerQuestion={handleAnswer}
+                            srsItems={srsItems}
+                            onRateSRS={handleRateSRS}
+                            bookmarks={bookmarks}
+                            onToggleBookmark={handleToggleBookmark}
+                            onSaveNote={handleSaveNote}
+                            strikes={strikes}
+                            onToggleStrike={handleToggleStrike}
+                            onSetStrikes={handleSetStrikes}
+                            isPaused={isErrorTimerPaused}
+                            isPageSettled={
+                              currentMode === 'error_notebook' &&
+                              !modeDragProgress?.isDragging &&
+                              !isModeTransitioning
+                            }
+                          />
+                        </React.Suspense>
+                      )}
                     </div>
                   </div>
 
@@ -474,13 +547,17 @@ export default function App() {
                     }}
                   >
                     <div className="max-w-7xl mx-auto w-full">
-                      <SimuladoView
-                        questions={activePoolQuestions}
-                        lastAnswers={answers}
-                        isPaused={isSimuladoTimerPaused}
-                        onRecordSimuladoResult={handleRecordSimuladoResult}
-                        onExit={() => handleSelectMode('practice')}
-                      />
+                      {(shouldMountSecondarySlides || currentMode === 'simulado') && (
+                        <React.Suspense fallback={null}>
+                          <SimuladoView
+                            questions={activePoolQuestions}
+                            lastAnswers={answers}
+                            isPaused={isSimuladoTimerPaused}
+                            onRecordSimuladoResult={handleRecordSimuladoResult}
+                            onExit={() => handleSelectMode('practice')}
+                          />
+                        </React.Suspense>
+                      )}
                     </div>
                   </div>
 
@@ -499,13 +576,17 @@ export default function App() {
                     }}
                   >
                     <div className="max-w-7xl mx-auto w-full">
-                      <MetricsDashboard
-                        stats={stats}
-                        questions={questions}
-                        srsItems={srsItems}
-                        answers={answers}
-                        onResetProgress={handleResetAllProgress}
-                      />
+                      {(shouldMountSecondarySlides || currentMode === 'metrics') && (
+                        <React.Suspense fallback={null}>
+                          <MetricsDashboard
+                            stats={stats}
+                            questions={questions}
+                            srsItems={srsItems}
+                            answers={answers}
+                            onResetProgress={handleResetAllProgress}
+                          />
+                        </React.Suspense>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -517,15 +598,17 @@ export default function App() {
             return (
               <div className="flex-1 min-h-0 h-full overflow-y-auto overflow-x-hidden overscroll-y-contain pb-24 lg:pb-8 px-4 sm:px-6 lg:px-8 pt-3 sm:pt-4">
                 <div className="max-w-7xl mx-auto w-full">
-                  <ThemeKitchenSink
-                    onExit={() => handleSelectMode('practice')}
-                    currentActiveTheme={theme}
-                    onSelectActiveTheme={(newTheme) => {
-                      setTheme(newTheme);
-                      applyThemeToDOM(newTheme);
-                      LocalStorageManager.savePreferences({ theme: newTheme });
-                    }}
-                  />
+                  <React.Suspense fallback={null}>
+                    <ThemeKitchenSink
+                      onExit={() => handleSelectMode('practice')}
+                      currentActiveTheme={theme}
+                      onSelectActiveTheme={(newTheme) => {
+                        setTheme(newTheme);
+                        applyThemeToDOM(newTheme);
+                        LocalStorageManager.savePreferences({ theme: newTheme });
+                      }}
+                    />
+                  </React.Suspense>
                 </div>
               </div>
             );
@@ -535,80 +618,94 @@ export default function App() {
         })()}
       </main>
 
-      {/* Database Manager Modal */}
-      <DatabaseManagerModal
-        isOpen={isDatabaseManagerOpen}
-        onClose={() => setIsDatabaseManagerOpen(false)}
-        databases={databases}
-        activeDatabaseId={filters.database_id}
-        onSelectDatabase={handleSelectDatabase}
-        onAddDatabase={handleAddDatabase}
-        onRenameDatabase={handleRenameDatabase}
-        onDeleteDatabase={handleDeleteDatabase}
-        onRestoreDefault={handleRestoreDefaultDatabases}
-        onRestoreBackupSuccess={() => {
-          setDatabases(LocalStorageManager.getDatabases());
-          setCurrentIndex(0);
-        }}
-      />
+      {/* Lazy Modals & Popovers wrapped in Suspense */}
+      <React.Suspense fallback={null}>
+        {isDatabaseManagerOpen && (
+          <DatabaseManagerModal
+            isOpen={isDatabaseManagerOpen}
+            onClose={() => setIsDatabaseManagerOpen(false)}
+            databases={databases}
+            activeDatabaseId={filters.database_id}
+            onSelectDatabase={handleSelectDatabase}
+            onAddDatabase={handleAddDatabase}
+            onRenameDatabase={handleRenameDatabase}
+            onDeleteDatabase={handleDeleteDatabase}
+            onRestoreDefault={handleRestoreDefaultDatabases}
+            onRestoreBackupSuccess={() => {
+              setDatabases(LocalStorageManager.getDatabases());
+              setCurrentIndex(0);
+            }}
+          />
+        )}
 
-      {/* Keyboard Shortcuts Reference Modal */}
-      <KeyboardShortcutsModal
-        isOpen={isShortcutsOpen}
-        onClose={() => setIsShortcutsOpen(false)}
-      />
+        {isShortcutsOpen && (
+          <KeyboardShortcutsModal
+            isOpen={isShortcutsOpen}
+            onClose={() => setIsShortcutsOpen(false)}
+          />
+        )}
 
-      {/* App Info & PWA Install Modal */}
-      <AppInfoModal
-        isOpen={isAppInfoOpen}
-        onClose={() => setIsAppInfoOpen(false)}
-        totalQuestions={questions.length}
-        isDevUser={isDevUser}
-        onOpenKitchenSink={() => {
-          setIsAppInfoOpen(false);
-          handleSelectMode('kitchen_sink');
-        }}
-      />
+        {isAppInfoOpen && (
+          <AppInfoModal
+            isOpen={isAppInfoOpen}
+            onClose={() => setIsAppInfoOpen(false)}
+            totalQuestions={questions.length}
+            isDevUser={isDevUser}
+            onOpenDatabaseManager={() => setIsDatabaseManagerOpen(true)}
+            onOpenShortcuts={() => setIsShortcutsOpen(true)}
+            onOpenBYOKModal={() => setIsBYOKModalOpen(true)}
+            onOpenAccountModal={() => setIsUserAccountModalOpen(true)}
+            onOpenKitchenSink={() => {
+              setIsAppInfoOpen(false);
+              handleSelectMode('kitchen_sink');
+            }}
+          />
+        )}
+
+        {isUserAccountModalOpen && (
+          <UserAccountModal
+            isOpen={isUserAccountModalOpen}
+            onClose={() => setIsUserAccountModalOpen(false)}
+            account={userAccount}
+            onUpdateAccount={setUserAccount}
+            stats={stats}
+            onNavigateToMetrics={() => handleSelectMode('metrics')}
+          />
+        )}
+
+        {isXPPerformanceOpen && (
+          <XPPerformanceModal
+            isOpen={isXPPerformanceOpen}
+            onClose={() => setIsXPPerformanceOpen(false)}
+            stats={stats}
+            onUpdateGoal={handleUpdateDailyGoalXP}
+          />
+        )}
+
+        {isBYOKModalOpen && (
+          <BYOKModal
+            isOpen={isBYOKModalOpen}
+            onClose={() => setIsBYOKModalOpen(false)}
+          />
+        )}
+
+        {(shouldMountSecondarySlides || isGlobalAssistantOpen) && (
+          <GlobalAssistantPopover
+            isOpen={isGlobalAssistantOpen}
+            onClose={() => setIsGlobalAssistantOpen(false)}
+            onOpenBYOKModal={() => setIsBYOKModalOpen(true)}
+            stats={stats}
+            answers={answers}
+            questions={questions}
+            currentQuestion={currentQuestion}
+          />
+        )}
+      </React.Suspense>
 
       {/* Full-Screen Blur Pause Overlay */}
       <PauseOverlay
         isOpen={isPaused}
         onResume={() => setIsPaused(false)}
-      />
-
-      {/* User Account, Profile & Storage Manager Modal */}
-      <UserAccountModal
-        isOpen={isUserAccountModalOpen}
-        onClose={() => setIsUserAccountModalOpen(false)}
-        account={userAccount}
-        onUpdateAccount={setUserAccount}
-        stats={stats}
-        onNavigateToMetrics={() => handleSelectMode('metrics')}
-      />
-
-      {/* XP Performance & Daily Goals Panel */}
-      <XPPerformanceModal
-        isOpen={isXPPerformanceOpen}
-        onClose={() => setIsXPPerformanceOpen(false)}
-        stats={stats}
-        onUpdateGoal={handleUpdateDailyGoalXP}
-      />
-
-      {/* Bring Your Own Key (BYOK) AI Configuration Modal */}
-      <BYOKModal
-        isOpen={isBYOKModalOpen}
-        onClose={() => setIsBYOKModalOpen(false)}
-      />
-
-      {/* Global AI Assistant & Learning Improvement Popover */}
-      <GlobalAssistantPopover
-        isOpen={isGlobalAssistantOpen}
-        onClose={() => setIsGlobalAssistantOpen(false)}
-        onOpenBYOKModal={() => setIsBYOKModalOpen(true)}
-        stats={stats}
-        answers={answers}
-        questions={questions}
-        currentQuestion={currentQuestion}
       />
 
       {/* Mobile Floating Bottom Mode Switcher Bar (< lg / compact style) */}

@@ -148,6 +148,7 @@ export const ResolutionSection: React.FC<ResolutionSectionProps> = ({
                 url={item.url}
                 alt={item.alt_text}
                 type={item.type}
+                lazy={true}
               />
               {item.alt_text && (
                 <p className="text-center text-xs text-muted mt-1.5 italic">{item.alt_text}</p>

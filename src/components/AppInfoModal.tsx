@@ -3,22 +3,23 @@ import {
   X, 
   Download, 
   Smartphone, 
-  Wifi, 
   WifiOff, 
   CheckCircle2, 
   RefreshCw, 
   Database, 
   HardDrive, 
-  Sparkles,
-  ExternalLink,
   ShieldCheck,
-  Cpu
+  KeyRound,
+  Keyboard,
+  UserCheck,
+  Lightbulb
 } from 'lucide-react';
 import { usePWAInstall } from '../hooks/usePWAInstall';
 import { APP_VERSION, APP_BUILD_ID, checkAppUpdate, forcePurgeAndReload } from '../lib/versionManager';
 import { MemorizLogo } from './MemorizLogo';
 import { ConfirmModal } from './ConfirmModal';
 import { DisableTipsModal, useTipsPreference } from './DisableTipsModal';
+import { LiveSwitch } from './ui/LiveSwitch';
 
 interface AppInfoModalProps {
   isOpen: boolean;
@@ -26,17 +27,23 @@ interface AppInfoModalProps {
   totalQuestions?: number;
   isDevUser?: boolean;
   onOpenKitchenSink?: () => void;
+  onOpenDatabaseManager?: () => void;
+  onOpenShortcuts?: () => void;
+  onOpenBYOKModal?: () => void;
+  onOpenAccountModal?: () => void;
 }
 
 export const AppInfoModal: React.FC<AppInfoModalProps> = ({
   isOpen,
   onClose,
   totalQuestions = 0,
-  isDevUser = false,
-  onOpenKitchenSink,
+  onOpenDatabaseManager,
+  onOpenShortcuts,
+  onOpenBYOKModal,
+  onOpenAccountModal,
 }) => {
   const { isInstallable, isStandalone, isOnline, effectiveType, install } = usePWAInstall();
-  const { showTips } = useTipsPreference();
+  const { showTips, setShowTips } = useTipsPreference();
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [updateFeedback, setUpdateFeedback] = useState<string | null>(null);
   const [showPurgeConfirm, setShowPurgeConfirm] = useState(false);
@@ -88,14 +95,14 @@ export const AppInfoModal: React.FC<AppInfoModalProps> = ({
             <div>
               <div className="flex items-center gap-2">
                 <h3 className="text-base font-bold text-primary theme-text-primary leading-none">
-                  Silenon
+                  Configurações do Silenon
                 </h3>
                 <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-accent-subtle text-accent-subtle-text border border-accent-subtle-border">
                   v{APP_VERSION}
                 </span>
               </div>
               <p className="text-xs text-secondary theme-text-secondary mt-1">
-                Informações do Sistema & Modo Offline
+                Simples no silício • Sistema & Modo Offline
               </p>
             </div>
           </div>
@@ -111,7 +118,111 @@ export const AppInfoModal: React.FC<AppInfoModalProps> = ({
 
         {/* Scrollable Content */}
         <div className="p-5 overflow-y-auto space-y-4 text-xs">
-          
+          {/* PAINEL DE CONTROLE (GRADE 2 COLUNAS) */}
+          <div className="grid grid-cols-2 gap-2.5">
+            <button
+              type="button"
+              onClick={() => {
+                onClose();
+                onOpenDatabaseManager?.();
+              }}
+              className="flex items-center gap-3 p-3 rounded-xl border border-border bg-surface-subtle hover:bg-surface-hover transition-colors text-left cursor-pointer group"
+            >
+              <div className="w-9 h-9 rounded-lg bg-surface border border-border flex items-center justify-center shrink-0 text-accent group-hover:border-accent/40 transition-colors">
+                <Database className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="font-semibold text-primary text-xs truncate">
+                  Bancos de Questões
+                </div>
+                <div className="text-[11px] text-muted truncate font-mono">
+                  .JSON / .ZIP
+                </div>
+              </div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                onClose();
+                onOpenBYOKModal?.();
+              }}
+              className="flex items-center gap-3 p-3 rounded-xl border border-border bg-surface-subtle hover:bg-surface-hover transition-colors text-left cursor-pointer group"
+            >
+              <div className="w-9 h-9 rounded-lg bg-surface border border-border flex items-center justify-center shrink-0 text-accent group-hover:border-accent/40 transition-colors">
+                <KeyRound className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="font-semibold text-primary text-xs truncate">
+                  Chaves de API
+                </div>
+                <div className="text-[11px] text-muted truncate">
+                  Gemini & Groq
+                </div>
+              </div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                onClose();
+                onOpenShortcuts?.();
+              }}
+              className="flex items-center gap-3 p-3 rounded-xl border border-border bg-surface-subtle hover:bg-surface-hover transition-colors text-left cursor-pointer group"
+            >
+              <div className="w-9 h-9 rounded-lg bg-surface border border-border flex items-center justify-center shrink-0 text-accent group-hover:border-accent/40 transition-colors">
+                <Keyboard className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="font-semibold text-primary text-xs truncate">
+                  Atalhos de Teclado
+                </div>
+                <div className="text-[11px] text-muted truncate font-mono">
+                  Tecla ?
+                </div>
+              </div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                onClose();
+                onOpenAccountModal?.();
+              }}
+              className="flex items-center gap-3 p-3 rounded-xl border border-border bg-surface-subtle hover:bg-surface-hover transition-colors text-left cursor-pointer group"
+            >
+              <div className="w-9 h-9 rounded-lg bg-surface border border-border flex items-center justify-center shrink-0 text-accent group-hover:border-accent/40 transition-colors">
+                <UserCheck className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="font-semibold text-primary text-xs truncate">
+                  Perfil & Metas
+                </div>
+                <div className="text-[11px] text-muted truncate">
+                  Conta & XP
+                </div>
+              </div>
+            </button>
+          </div>
+
+          {/* LINHA LIMPA: EXIBIR DICAS DE USO */}
+          <div
+            onClick={() => setShowTips(!showTips)}
+            className="flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-xl border border-border bg-surface-subtle hover:bg-surface-hover transition-colors cursor-pointer select-none"
+          >
+            <div className="flex items-center gap-2.5 min-w-0">
+              <Lightbulb className="w-4 h-4 text-accent shrink-0" />
+              <span className="font-medium text-primary text-xs truncate">
+                Exibir dicas de uso na interface
+              </span>
+            </div>
+            <LiveSwitch
+              id="app-info-toggle-tips"
+              checked={showTips}
+              onChange={() => setShowTips(!showTips)}
+            />
+          </div>
+
           {/* SECTION 1: INSTALAR APLICATIVO / PWA */}
           <div className="p-4 rounded-xl border border-accent-subtle-border bg-accent-subtle/30 space-y-3">
             <div className="flex items-center justify-between">

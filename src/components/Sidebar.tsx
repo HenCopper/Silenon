@@ -1,13 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { 
-  BookOpen, 
-  BrainCircuit, 
   Flame, 
-  Timer, 
-  AlertTriangle, 
-  BarChart3, 
-  Database, 
-  Keyboard, 
   Search, 
   RotateCcw, 
   CheckCircle2, 
@@ -15,15 +8,14 @@ import {
   Bookmark, 
   X,
   ChevronLeft,
-  RefreshCw,
-  Info
+  ChevronDown,
+  ChevronRight,
+  Settings,
+  Filter,
+  Layers
 } from 'lucide-react';
 import { StudyMode, FilterState, UserStatistics, QuestionDatabase, UserAccount } from '../types/question';
-import { forcePurgeAndReload } from '../lib/versionManager';
-import { ConfirmModal } from './ConfirmModal';
 import { MemorizLogo } from './MemorizLogo';
-import { LiveSwitch } from './ui/LiveSwitch';
-import { useTipsPreference } from './DisableTipsModal';
 
 interface SidebarProps {
   isOpen: boolean;
@@ -67,8 +59,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
   isOpen,
   onToggle,
   onClose,
-  currentMode,
-  onSelectMode,
   filters,
   onChangeFilters,
   subjects,
@@ -77,21 +67,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
   topics,
   subjectCounts,
   statusCounts,
-  totalFiltered,
   totalAll,
   stats,
-  errorCount,
-  srsDueCount,
-  onOpenDatabaseManager,
-  onOpenShortcuts,
   onOpenAppInfo,
   onOpenXPPerformance,
   userAccount,
   onOpenAccountModal,
-  isDevUser = false,
 }) => {
-  const [showPurgeConfirm, setShowPurgeConfirm] = useState(false);
-  const { showTips, setShowTips } = useTipsPreference();
+  const [isStatusTreeOpen, setIsStatusTreeOpen] = useState(false);
+  const [isSubjectsTreeOpen, setIsSubjectsTreeOpen] = useState(false);
 
   // Prevent background scrolling when sidebar is open
   useEffect(() => {
@@ -133,6 +117,26 @@ export const Sidebar: React.FC<SidebarProps> = ({
     filters.status !== 'all' || 
     filters.searchQuery.trim().length > 0 ||
     !!filters.isRegexSearch;
+
+  const getActiveStatusLabel = () => {
+    switch (filters.status) {
+      case 'unanswered':
+        return { label: 'Novas', count: statusCounts.unanswered };
+      case 'correct':
+        return { label: 'Acertos', count: statusCounts.correct };
+      case 'wrong':
+        return { label: 'Erros', count: statusCounts.wrong };
+      case 'bookmarked':
+        return { label: 'Salvas', count: statusCounts.bookmarked };
+      default:
+        return { label: 'Todas', count: statusCounts.all };
+    }
+  };
+
+  const activeStatusInfo = getActiveStatusLabel();
+  const activeSubjectLabel = filters.subject === 'all' ? 'Todas' : filters.subject;
+  const activeSubjectCount =
+    filters.subject === 'all' ? totalAll : subjectCounts[filters.subject] || 0;
 
   const effectiveGoal = stats.daily_goal_xp > 0 ? stats.daily_goal_xp : 50;
   const currentTodayXP = typeof stats.today_xp === 'number' && stats.today_xp > 0 
@@ -214,113 +218,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
 
         {/* Scrollable Content */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-5 text-xs">
+        <div
+          className="flex-1 overflow-y-auto p-4 space-y-5 text-xs"
+          style={{ scrollbarGutter: 'stable' }}
+        >
 
-          {/* SECTION 1: NAVEGAÇÃO PRINCIPAL */}
-          <div className="space-y-1">
-            <div className="px-2 pb-1.5 text-[11px] font-semibold tracking-wider text-muted uppercase">
-              Navegação
-            </div>
-
-            <button
-              onClick={() => {
-                onSelectMode('practice');
-                if (window.innerWidth < 1024) handleClose();
-              }}
-              className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-colors cursor-pointer ${
-                currentMode === 'practice'
-                  ? 'bg-accent-subtle text-accent font-medium border border-accent/30'
-                  : 'text-secondary hover:bg-surface-subtle hover:text-primary'
-              }`}
-            >
-              <div className="flex items-center gap-2.5">
-                <BookOpen className="w-4 h-4" />
-                <span>Prática de Questões</span>
-              </div>
-              <span className="text-xs text-muted font-mono">{totalFiltered}/{totalAll}</span>
-            </button>
-
-            <button
-              onClick={() => {
-                onSelectMode('srs');
-                if (window.innerWidth < 1024) handleClose();
-              }}
-              className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-colors cursor-pointer ${
-                currentMode === 'srs'
-                  ? 'bg-accent-subtle text-accent font-medium border border-accent/30'
-                  : 'text-secondary hover:bg-surface-subtle hover:text-primary'
-              }`}
-            >
-              <div className="flex items-center gap-2.5">
-                <BrainCircuit className="w-4 h-4" />
-                <span>Fixação de Conteúdo</span>
-              </div>
-              {srsDueCount > 0 && (
-                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-accent text-accent-contrast shadow-2xs">
-                  {srsDueCount}
-                </span>
-              )}
-            </button>
-
-            <button
-              onClick={() => {
-                onSelectMode('error_notebook');
-                if (window.innerWidth < 1024) handleClose();
-              }}
-              className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-colors cursor-pointer ${
-                currentMode === 'error_notebook'
-                  ? 'bg-danger-bg text-danger font-medium border border-danger-border'
-                  : 'text-secondary hover:bg-surface-subtle hover:text-primary'
-              }`}
-            >
-              <div className="flex items-center gap-2.5">
-                <AlertTriangle className="w-4 h-4" />
-                <span>Caderno de Erros</span>
-              </div>
-              {errorCount > 0 && (
-                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-danger-bg text-danger border border-danger-border">
-                  {errorCount}
-                </span>
-              )}
-            </button>
-
-            <button
-              onClick={() => {
-                onSelectMode('simulado');
-                if (window.innerWidth < 1024) handleClose();
-              }}
-              className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-colors cursor-pointer ${
-                currentMode === 'simulado'
-                  ? 'bg-warning-bg text-warning font-medium border border-warning-border'
-                  : 'text-secondary hover:bg-surface-subtle hover:text-primary'
-              }`}
-            >
-              <div className="flex items-center gap-2.5">
-                <Timer className="w-4 h-4" />
-                <span>Modo Simulado</span>
-              </div>
-            </button>
-
-            <button
-              onClick={() => {
-                onSelectMode('metrics');
-                if (window.innerWidth < 1024) handleClose();
-              }}
-              className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-colors cursor-pointer ${
-                currentMode === 'metrics'
-                  ? 'bg-success-bg text-success font-medium border border-success-border'
-                  : 'text-secondary hover:bg-surface-subtle hover:text-primary'
-              }`}
-            >
-              <div className="flex items-center gap-2.5">
-                <BarChart3 className="w-4 h-4" />
-                <span>Métricas & Retenção</span>
-              </div>
-            </button>
-          </div>
-
-          {/* SECTION 2: BUSCA & FILTROS DE QUESTÕES */}
-          <div className="space-y-3 pt-3 border-t border-border">
+          {/* SECTION 1: BUSCA & FILTROS DE QUESTÕES */}
+          <div className="space-y-3">
             <div className="flex items-center justify-between px-2">
               <span className="text-[11px] font-semibold tracking-wider text-muted uppercase">
                 Busca & Filtros
@@ -390,133 +294,219 @@ export const Sidebar: React.FC<SidebarProps> = ({
               )}
             </div>
 
-            {/* Status Filter Badges */}
-            <div className="space-y-1.5">
-              <label className="text-[11px] text-muted px-1 font-medium block">
-                Status de Resolução
-              </label>
-              <div className="grid grid-cols-2 gap-1.5">
-                <button
-                  onClick={() => onChangeFilters({ ...filters, status: 'all' })}
-                  className={`px-2.5 py-1.5 rounded-md text-xs font-medium flex items-center justify-between transition-colors cursor-pointer ${
-                    filters.status === 'all'
-                      ? 'theme-chip-active font-semibold'
-                      : 'theme-chip-inactive'
-                  }`}
-                >
-                  <span>Todas</span>
-                  <span className={`font-mono text-[10px] font-bold px-1.5 py-0.5 rounded ${
-                    filters.status === 'all' ? 'bg-accent-contrast/20 text-accent-contrast' : 'text-primary bg-surface border border-border'
-                  }`}>{statusCounts.all}</span>
-                </button>
+            {/* ÁRVORE EXPANSÍVEL 1: FILTRAR POR STATUS */}
+            <div>
+              <button
+                type="button"
+                onClick={() => setIsStatusTreeOpen((prev) => !prev)}
+                className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl border transition-colors cursor-pointer ${
+                  isStatusTreeOpen || filters.status !== 'all'
+                    ? 'bg-surface-subtle border-accent/40 text-primary'
+                    : 'bg-surface-subtle border-border text-secondary hover:text-primary hover:bg-surface-hover'
+                }`}
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  {isStatusTreeOpen ? (
+                    <ChevronDown className="w-4 h-4 text-accent shrink-0" />
+                  ) : (
+                    <ChevronRight className="w-4 h-4 text-muted shrink-0" />
+                  )}
+                  <Filter className="w-3.5 h-3.5 text-muted shrink-0" />
+                  <span className="font-semibold text-xs truncate">Filtrar por Status</span>
+                </div>
 
-                <button
-                  onClick={() => onChangeFilters({ ...filters, status: 'unanswered' })}
-                  className={`px-2.5 py-1.5 rounded-md text-xs font-medium flex items-center justify-between transition-colors cursor-pointer ${
-                    filters.status === 'unanswered'
-                      ? 'theme-chip-active font-semibold'
-                      : 'theme-chip-inactive'
-                  }`}
-                >
-                  <span>Novas</span>
-                  <span className={`font-mono text-[10px] font-bold px-1.5 py-0.5 rounded ${
-                    filters.status === 'unanswered' ? 'bg-accent-contrast/20 text-accent-contrast' : 'text-primary bg-surface border border-border'
-                  }`}>{statusCounts.unanswered}</span>
-                </button>
-
-                <button
-                  onClick={() => onChangeFilters({ ...filters, status: 'correct' })}
-                  className={`px-2.5 py-1.5 rounded-md text-xs font-medium flex items-center justify-between transition-colors cursor-pointer ${
-                    filters.status === 'correct'
-                      ? 'bg-success-bg text-success border border-success-border font-semibold'
-                      : 'theme-chip-inactive'
-                  }`}
-                >
-                  <span className="flex items-center gap-1">
-                    <CheckCircle2 className="w-3 h-3 text-success" />
-                    <span>Acertos</span>
+                <div className="flex items-center gap-1.5 shrink-0 pl-2">
+                  <span
+                    className={`px-2 py-0.5 rounded-md text-[11px] font-medium ${
+                      filters.status !== 'all'
+                        ? 'bg-accent text-accent-contrast font-semibold'
+                        : 'bg-surface text-secondary border border-border'
+                    }`}
+                  >
+                    {activeStatusInfo.label}
                   </span>
-                  <span className={`font-mono text-[10px] font-bold px-1.5 py-0.5 rounded ${
-                    filters.status === 'correct' ? 'bg-success/20 text-success' : 'text-primary bg-surface border border-border'
-                  }`}>{statusCounts.correct}</span>
-                </button>
-
-                <button
-                  onClick={() => onChangeFilters({ ...filters, status: 'wrong' })}
-                  className={`px-2.5 py-1.5 rounded-md text-xs font-medium flex items-center justify-between transition-colors cursor-pointer ${
-                    filters.status === 'wrong'
-                      ? 'bg-danger-bg text-danger border border-danger-border font-semibold'
-                      : 'theme-chip-inactive'
-                  }`}
-                >
-                  <span className="flex items-center gap-1">
-                    <XCircle className="w-3 h-3 text-danger" />
-                    <span>Erros</span>
+                  <span className="font-mono text-[10px] font-bold px-1.5 py-0.5 rounded bg-surface border border-border text-primary">
+                    {activeStatusInfo.count}
                   </span>
-                  <span className={`font-mono text-[10px] font-bold px-1.5 py-0.5 rounded ${
-                    filters.status === 'wrong' ? 'bg-danger/20 text-danger' : 'text-primary bg-surface border border-border'
-                  }`}>{statusCounts.wrong}</span>
-                </button>
+                </div>
+              </button>
 
-                <button
-                  onClick={() => onChangeFilters({ ...filters, status: 'bookmarked' })}
-                  className={`px-2.5 py-1.5 rounded-md text-xs font-medium flex items-center justify-between transition-colors col-span-2 cursor-pointer ${
-                    filters.status === 'bookmarked'
-                      ? 'theme-badge-accent shadow-xs font-semibold'
-                      : 'theme-chip-inactive'
-                  }`}
-                >
-                  <span className="flex items-center gap-1">
-                    <Bookmark className={`w-3 h-3 ${filters.status === 'bookmarked' ? 'fill-current text-accent' : 'text-muted'}`} />
-                    <span>Marcadas / Salvas</span>
-                  </span>
-                  <span className={`font-mono text-[10px] font-bold px-1.5 py-0.5 rounded ${
-                    filters.status === 'bookmarked' ? 'theme-badge-accent font-bold' : 'text-primary bg-surface border border-border'
-                  }`}>{statusCounts.bookmarked}</span>
-                </button>
+              <div
+                className={`grid transition-[grid-template-rows,opacity] duration-250 ease-out ${
+                  isStatusTreeOpen
+                    ? 'grid-rows-[1fr] opacity-100'
+                    : 'grid-rows-[0fr] opacity-0 pointer-events-none'
+                }`}
+              >
+                <div className="overflow-hidden min-h-0">
+                  <div className="pl-3 ml-2 border-l-2 border-border space-y-1.5 pt-2.5">
+                    <div className="grid grid-cols-2 gap-1.5">
+                      <button
+                        onClick={() => onChangeFilters({ ...filters, status: 'all' })}
+                        className={`px-2.5 py-1.5 rounded-md text-xs font-medium flex items-center justify-between transition-colors cursor-pointer ${
+                          filters.status === 'all'
+                            ? 'theme-chip-active font-semibold'
+                            : 'theme-chip-inactive'
+                        }`}
+                      >
+                        <span>Todas</span>
+                        <span className={`font-mono text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                          filters.status === 'all' ? 'bg-accent-contrast/20 text-accent-contrast' : 'text-primary bg-surface border border-border'
+                        }`}>{statusCounts.all}</span>
+                      </button>
+
+                      <button
+                        onClick={() => onChangeFilters({ ...filters, status: 'unanswered' })}
+                        className={`px-2.5 py-1.5 rounded-md text-xs font-medium flex items-center justify-between transition-colors cursor-pointer ${
+                          filters.status === 'unanswered'
+                            ? 'theme-chip-active font-semibold'
+                            : 'theme-chip-inactive'
+                        }`}
+                      >
+                        <span>Novas</span>
+                        <span className={`font-mono text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                          filters.status === 'unanswered' ? 'bg-accent-contrast/20 text-accent-contrast' : 'text-primary bg-surface border border-border'
+                        }`}>{statusCounts.unanswered}</span>
+                      </button>
+
+                      <button
+                        onClick={() => onChangeFilters({ ...filters, status: 'correct' })}
+                        className={`px-2.5 py-1.5 rounded-md text-xs font-medium flex items-center justify-between transition-colors cursor-pointer ${
+                          filters.status === 'correct'
+                            ? 'bg-success-bg text-success border border-success-border font-semibold'
+                            : 'theme-chip-inactive'
+                        }`}
+                      >
+                        <span className="flex items-center gap-1">
+                          <CheckCircle2 className="w-3 h-3 text-success" />
+                          <span>Acertos</span>
+                        </span>
+                        <span className={`font-mono text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                          filters.status === 'correct' ? 'bg-success/20 text-success' : 'text-primary bg-surface border border-border'
+                        }`}>{statusCounts.correct}</span>
+                      </button>
+
+                      <button
+                        onClick={() => onChangeFilters({ ...filters, status: 'wrong' })}
+                        className={`px-2.5 py-1.5 rounded-md text-xs font-medium flex items-center justify-between transition-colors cursor-pointer ${
+                          filters.status === 'wrong'
+                            ? 'bg-danger-bg text-danger border border-danger-border font-semibold'
+                            : 'theme-chip-inactive'
+                        }`}
+                      >
+                        <span className="flex items-center gap-1">
+                          <XCircle className="w-3 h-3 text-danger" />
+                          <span>Erros</span>
+                        </span>
+                        <span className={`font-mono text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                          filters.status === 'wrong' ? 'bg-danger/20 text-danger' : 'text-primary bg-surface border border-border'
+                        }`}>{statusCounts.wrong}</span>
+                      </button>
+
+                      <button
+                        onClick={() => onChangeFilters({ ...filters, status: 'bookmarked' })}
+                        className={`px-2.5 py-1.5 rounded-md text-xs font-medium flex items-center justify-between transition-colors col-span-2 cursor-pointer ${
+                          filters.status === 'bookmarked'
+                            ? 'theme-badge-accent shadow-xs font-semibold'
+                            : 'theme-chip-inactive'
+                        }`}
+                      >
+                        <span className="flex items-center gap-1">
+                          <Bookmark className={`w-3 h-3 ${filters.status === 'bookmarked' ? 'fill-current text-accent' : 'text-muted'}`} />
+                          <span>Marcadas / Salvas</span>
+                        </span>
+                        <span className={`font-mono text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                          filters.status === 'bookmarked' ? 'theme-badge-accent font-bold' : 'text-primary bg-surface border border-border'
+                        }`}>{statusCounts.bookmarked}</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
 
-            {/* Disciplinas List */}
-            <div className="space-y-1.5">
-              <label className="text-[11px] text-muted px-1 font-medium block">
-                Disciplinas
-              </label>
-              <div className="space-y-1">
-                <button
-                  onClick={() => onChangeFilters({ ...filters, subject: 'all' })}
-                  className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-md text-left transition-colors cursor-pointer ${
-                    filters.subject === 'all'
-                      ? 'bg-accent text-accent-contrast font-semibold shadow-xs'
-                      : 'text-secondary hover:bg-surface-subtle'
-                  }`}
-                >
-                  <span>Todas as Disciplinas</span>
-                  <span className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded min-w-[26px] text-center shrink-0 ${
-                    filters.subject === 'all' ? 'bg-accent-contrast/20 text-accent-contrast border border-transparent' : 'text-primary bg-surface-subtle border border-border'
-                  }`}>{totalAll}</span>
-                </button>
+            {/* ÁRVORE EXPANSÍVEL 2: FILTRAR POR DISCIPLINAS */}
+            <div>
+              <button
+                type="button"
+                onClick={() => setIsSubjectsTreeOpen((prev) => !prev)}
+                className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl border transition-colors cursor-pointer ${
+                  isSubjectsTreeOpen || filters.subject !== 'all'
+                    ? 'bg-surface-subtle border-accent/40 text-primary'
+                    : 'bg-surface-subtle border-border text-secondary hover:text-primary hover:bg-surface-hover'
+                }`}
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  {isSubjectsTreeOpen ? (
+                    <ChevronDown className="w-4 h-4 text-accent shrink-0" />
+                  ) : (
+                    <ChevronRight className="w-4 h-4 text-muted shrink-0" />
+                  )}
+                  <Layers className="w-3.5 h-3.5 text-muted shrink-0" />
+                  <span className="font-semibold text-xs truncate">Filtrar por Disciplinas</span>
+                </div>
 
-                {subjects.map(s => {
-                  const count = subjectCounts[s] || 0;
-                  const isSelected = filters.subject === s;
-                  return (
+                <div className="flex items-center gap-1.5 min-w-0 max-w-[50%] pl-2">
+                  <span
+                    className={`px-2 py-0.5 rounded-md text-[11px] font-medium truncate ${
+                      filters.subject !== 'all'
+                        ? 'bg-accent text-accent-contrast font-semibold'
+                        : 'bg-surface text-secondary border border-border'
+                    }`}
+                  >
+                    {activeSubjectLabel}
+                  </span>
+                  <span className="font-mono text-[10px] font-bold px-1.5 py-0.5 rounded bg-surface border border-border text-primary shrink-0">
+                    {activeSubjectCount}
+                  </span>
+                </div>
+              </button>
+
+              <div
+                className={`grid transition-[grid-template-rows,opacity] duration-250 ease-out ${
+                  isSubjectsTreeOpen
+                    ? 'grid-rows-[1fr] opacity-100'
+                    : 'grid-rows-[0fr] opacity-0 pointer-events-none'
+                }`}
+              >
+                <div className="overflow-hidden min-h-0">
+                  <div className="pl-3 ml-2 border-l-2 border-border space-y-1 pt-2.5">
                     <button
-                      key={s}
-                      onClick={() => onChangeFilters({ ...filters, subject: isSelected ? 'all' : s })}
+                      onClick={() => onChangeFilters({ ...filters, subject: 'all' })}
                       className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-md text-left transition-colors cursor-pointer ${
-                        isSelected
+                        filters.subject === 'all'
                           ? 'bg-accent text-accent-contrast font-semibold shadow-xs'
                           : 'text-secondary hover:bg-surface-subtle'
                       }`}
                     >
-                      <span className="truncate pr-2">{s}</span>
+                      <span>Todas as Disciplinas</span>
                       <span className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded min-w-[26px] text-center shrink-0 ${
-                        isSelected ? 'bg-accent-contrast/20 text-accent-contrast border border-transparent' : 'text-primary bg-surface-subtle border border-border'
-                      }`}>{count}</span>
+                        filters.subject === 'all' ? 'bg-accent-contrast/20 text-accent-contrast border border-transparent' : 'text-primary bg-surface-subtle border border-border'
+                      }`}>{totalAll}</span>
                     </button>
-                  );
-                })}
+
+                    {subjects.map(s => {
+                      const count = subjectCounts[s] || 0;
+                      const isSelected = filters.subject === s;
+                      return (
+                        <button
+                          key={s}
+                          onClick={() => onChangeFilters({ ...filters, subject: isSelected ? 'all' : s })}
+                          className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-md text-left transition-colors cursor-pointer ${
+                            isSelected
+                              ? 'bg-accent text-accent-contrast font-semibold shadow-xs'
+                              : 'text-secondary hover:bg-surface-subtle'
+                          }`}
+                        >
+                          <span className="truncate pr-2">{s}</span>
+                          <span className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded min-w-[26px] text-center shrink-0 ${
+                            isSelected ? 'bg-accent-contrast/20 text-accent-contrast border border-transparent' : 'text-primary bg-surface-subtle border border-border'
+                          }`}>{count}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -574,70 +564,22 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </div>
           </div>
 
-          {/* SECTION 3: FERRAMENTAS */}
+          {/* SECTION 2: CONFIGURAÇÕES CENTRALIZADAS */}
           <div className="space-y-1 pt-3 border-t border-border">
-            <div className="px-2 pb-1.5 text-[11px] font-semibold tracking-wider text-muted uppercase">
-              Ferramentas
-            </div>
-
             <button
+              id="sidebar-app-info-item-btn"
+              type="button"
               onClick={() => {
-                onOpenDatabaseManager();
+                if (onOpenAppInfo) onOpenAppInfo();
                 if (window.innerWidth < 1024) handleClose();
               }}
-              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-secondary hover:bg-surface-subtle hover:text-primary transition-colors cursor-pointer"
+              className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl bg-surface-subtle hover:bg-surface-hover border border-border text-secondary hover:text-primary transition-colors cursor-pointer group"
             >
-              <Database className="w-4 h-4 text-muted" />
-              <span>Gerenciador de Banco JSON</span>
-            </button>
-
-            <button
-              onClick={() => {
-                onOpenShortcuts();
-                if (window.innerWidth < 1024) handleClose();
-              }}
-              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-secondary hover:bg-surface-subtle hover:text-primary transition-colors cursor-pointer"
-            >
-              <Keyboard className="w-4 h-4 text-muted" />
-              <span>Atalhos de Teclado</span>
-            </button>
-
-            <div
-              onClick={() => setShowTips(!showTips)}
-              className="w-full flex items-center justify-between gap-2.5 px-3 py-2 rounded-lg text-secondary hover:bg-surface-subtle hover:text-primary transition-colors cursor-pointer select-none"
-            >
-              <span>Exibir dicas de uso</span>
-              <LiveSwitch
-                id="sidebar-toggle-tips"
-                checked={showTips}
-                onChange={() => setShowTips(!showTips)}
-                title={showTips ? 'Ocultar dicas de uso na interface' : 'Exibir dicas de uso na interface'}
-              />
-            </div>
-
-            {onOpenAppInfo && (
-              <button
-                id="sidebar-app-info-item-btn"
-                onClick={() => {
-                  onOpenAppInfo();
-                  if (window.innerWidth < 1024) handleClose();
-                }}
-                className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-secondary hover:bg-surface-subtle hover:text-primary transition-colors cursor-pointer"
-              >
-                <Info className="w-4 h-4 text-muted" />
-                <span>Sobre o App (PWA & Offline)</span>
-              </button>
-            )}
-
-            <button
-              onClick={() => {
-                setShowPurgeConfirm(true);
-              }}
-              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-muted hover:bg-surface-subtle hover:text-primary transition-colors cursor-pointer text-xs"
-              title="0 Tolerância a Versão Antiga: Limpa caches e recarrega"
-            >
-              <RefreshCw className="w-3.5 h-3.5 text-muted" />
-              <span>Limpar Cache & Recarregar</span>
+              <div className="flex items-center gap-2.5">
+                <Settings className="w-4 h-4 text-accent group-hover:rotate-45 transition-transform" />
+                <span className="font-semibold text-xs text-primary">Configurações</span>
+              </div>
+              <ChevronRight className="w-4 h-4 text-muted" />
             </button>
           </div>
         </div>
@@ -671,21 +613,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </button>
         </div>
       </aside>
-
-      {/* In-App Confirmation Modal */}
-      <ConfirmModal
-        isOpen={showPurgeConfirm}
-        title="Limpar Cache & Recarregar"
-        message="Deseja limpar todos os dados de cache do navegador e forçar o recarregamento da versão mais recente? (Requer internet)"
-        confirmLabel="Limpar e Recarregar"
-        cancelLabel="Cancelar"
-        variant="warning"
-        onConfirm={() => {
-          setShowPurgeConfirm(false);
-          forcePurgeAndReload();
-        }}
-        onCancel={() => setShowPurgeConfirm(false)}
-      />
     </>
   );
 };

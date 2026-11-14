@@ -1,8 +1,9 @@
-import { Question } from '../types/question';
+import { Question, UserAnswerRecord, UserStatistics } from '../types/question';
 
 export const AI_KEYS_STORAGE_KEY = 'memoriz_ai_keys_v1';
 export const AI_ACCUMULATED_TOKENS_KEY = 'memoriz_ai_accumulated_tokens_v1';
 export const VOICE_ONBOARDING_DONE_KEY = 'memoriz_voice_onboarding_done_v1';
+export const STRIVE_SUGGESTIONS_CACHE_KEY = 'memoriz_strive_suggestions_v1';
 
 export interface AIKeysConfig {
   geminiApiKey: string;
@@ -396,8 +397,8 @@ export function isRpmRateLimit(errorMsg: string): boolean {
   );
 }
 
-export const AI_REQUEST_TIMEOUT_MS = 45000;
-export const AI_HIGH_THINKING_TIMEOUT_MS = 90000;
+export const AI_REQUEST_TIMEOUT_MS = 15000;
+export const AI_HIGH_THINKING_TIMEOUT_MS = 45000;
 
 export async function fetchWithTimeout(
   url: string,
@@ -705,14 +706,18 @@ async function callGroqModel(
     body.response_format = { type: 'json_object' };
   }
 
-  const response = await fetchWithTimeout('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
+  const response = await fetchWithTimeout(
+    'https://api.groq.com/openai/v1/chat/completions',
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(body),
     },
-    body: JSON.stringify(body),
-  });
+    AI_REQUEST_TIMEOUT_MS
+  );
 
   if (!response.ok) {
     const errText = await response.text().catch(() => '');
@@ -921,19 +926,23 @@ export async function streamGeminiModel(
     throw new Error('Chave Gemini (BYOK) não configurada.');
   }
 
-  const response = await fetchWithTimeout('/api/gemini/stream', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-gemini-api-key': cleanKey,
+  const response = await fetchWithTimeout(
+    '/api/gemini/stream',
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-gemini-api-key': cleanKey,
+      },
+      body: JSON.stringify({
+        model,
+        messages,
+        jsonMode,
+        apiKey: cleanKey,
+      }),
     },
-    body: JSON.stringify({
-      model,
-      messages,
-      jsonMode,
-      apiKey: cleanKey,
-    }),
-  });
+    AI_HIGH_THINKING_TIMEOUT_MS
+  );
 
   if (!response.ok || !response.body) {
     const errText = await response.text().catch(() => '');
@@ -2201,5 +2210,184 @@ export function extractFlatAnswers<T = any>(
   return Object.values(answers).flatMap((list) => (Array.isArray(list) ? list : []));
 }
 
+export const DEFAULT_STRIVE_SUGGESTIONS: string[] = [
+  'Como organizar meu ritmo de estudo?',
+  'Quais temas mais caem na prova?',
+  'Vamos revisar conceitos fundamentais hoje?',
+];
 
+interface CachedStriveSuggestionsPayload {
+  suggestions: string[];
+  totalAnswered: number;
+  lastAnswerTimestamp: number;
+}
 
+function sanitizeSuggestionItem(raw: unknown): string {
+  if (typeof raw !== 'string') return '';
+  const cleaned = raw
+    .trim()
+    .replace(/^["'“”«»\-*•\d.)\s]+/, '')
+    .replace(/["'“”«»]+$/, '')
+    .replace(/\bquest[aã]o\s*#?\d+\b/gi, '')
+    .replace(/#\d+\b/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  if (!cleaned) return '';
+  const words = cleaned.split(/\s+/);
+  return words.length > 7 ? words.slice(0, 7).join(' ') : cleaned;
+}
+
+function readStriveSuggestionsCache(): CachedStriveSuggestionsPayload | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(STRIVE_SUGGESTIONS_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (
+      parsed &&
+      Array.isArray(parsed.suggestions) &&
+      parsed.suggestions.length === 3 &&
+      parsed.suggestions.every((s: unknown) => typeof s === 'string' && s.trim().length > 0) &&
+      typeof parsed.totalAnswered === 'number' &&
+      typeof parsed.lastAnswerTimestamp === 'number'
+    ) {
+      return {
+        suggestions: parsed.suggestions.map((s: string) => s.trim()),
+        totalAnswered: parsed.totalAnswered,
+        lastAnswerTimestamp: parsed.lastAnswerTimestamp,
+      };
+    }
+  } catch {
+    // Ignore invalid cache
+  }
+  return null;
+}
+
+export function getCachedStriveSuggestions(
+  answers?: Record<number, UserAnswerRecord[]> | UserAnswerRecord[] | null
+): string[] {
+  if (answers) {
+    const flat = extractFlatAnswers<UserAnswerRecord>(answers);
+    if (flat.length === 0) {
+      return [...DEFAULT_STRIVE_SUGGESTIONS];
+    }
+  }
+  const cached = readStriveSuggestionsCache();
+  if (cached && cached.suggestions.length === 3) {
+    return cached.suggestions;
+  }
+  return [...DEFAULT_STRIVE_SUGGESTIONS];
+}
+
+/**
+ * Gera 3 sugestões curtas e personalizadas para a tela inicial do Modo Strive
+ * via Groq (`qwen/qwen3.8-27b`, fallback `llama-3.3-70b-versatile`), focadas nos
+ * padrões de erro/distratores recentes (sem citar números de questão ou arquivos).
+ */
+export async function generateDynamicStriveSuggestions(
+  answers: Record<number, UserAnswerRecord[]> | UserAnswerRecord[] | undefined | null,
+  questions: Question[],
+  stats?: UserStatistics | null
+): Promise<string[]> {
+  const flatAnswers = extractFlatAnswers<UserAnswerRecord>(answers);
+  const totalAnswered =
+    typeof stats?.total_answered === 'number' && stats.total_answered > flatAnswers.length
+      ? stats.total_answered
+      : flatAnswers.length;
+
+  if (flatAnswers.length === 0) {
+    return [...DEFAULT_STRIVE_SUGGESTIONS];
+  }
+
+  const lastAnswerTimestamp = flatAnswers.reduce(
+    (maxTs, item) => (typeof item?.timestamp === 'number' && item.timestamp > maxTs ? item.timestamp : maxTs),
+    0
+  );
+
+  const cached = readStriveSuggestionsCache();
+  if (cached && cached.totalAnswered === totalAnswered && cached.suggestions.length === 3) {
+    return cached.suggestions;
+  }
+
+  const { groqApiKey } = getAIKeys();
+  const isOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
+  if (!groqApiKey || isOffline) {
+    return cached?.suggestions?.length === 3 ? cached.suggestions : [...DEFAULT_STRIVE_SUGGESTIONS];
+  }
+
+  // Resumo compacto das últimas ~8 respostas (sem número de questão e sem enunciado completo)
+  const questionById = new Map<number, Question>();
+  for (const q of questions || []) {
+    if (q && typeof q.sequence_id === 'number') {
+      questionById.set(q.sequence_id, q);
+    }
+  }
+
+  const recentAnswers = [...flatAnswers]
+    .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
+    .slice(0, 8)
+    .map((ans) => {
+      const q = questionById.get(ans.question_id);
+      const selectedOpt = q?.options?.find(
+        (opt) => opt.letter.toUpperCase() === String(ans.selected_letter || '').toUpperCase()
+      );
+      return {
+        subject: q?.metadata?.subject || 'Geral',
+        topics: (q?.metadata?.topics || []).slice(0, 4),
+        is_correct: Boolean(ans.is_correct),
+        selected_letter: ans.selected_letter,
+        distractor_type: selectedOpt?.distractor_type || undefined,
+        why_wrong_or_right: selectedOpt?.why_wrong_or_right
+          ? selectedOpt.why_wrong_or_right.slice(0, 200)
+          : undefined,
+      };
+    });
+
+  const messages: AIMessage[] = [
+    {
+      role: 'system',
+      content: `Você gera 3 sugestões curtas de mensagens iniciais que o próprio estudante pode enviar ao seu mentor de estudos (Strive) no estilo WhatsApp.
+REGRAS OBRIGATÓRIAS:
+1. Retorne EXCLUSIVAMENTE um objeto JSON válido no formato: {"suggestions": ["frase 1", "frase 2", "frase 3"]}.
+2. Cada frase deve ter NO MÁXIMO 7 PALAVRAS, em primeira pessoa do estudante para o mentor, tom humano, leve e natural (exemplos: "Vamos treinar divisão", "Me explica melhor eletrodinâmica", "Bora revisar regra de três?").
+3. Baseie as 3 sugestões diretamente nos padrões dos distratores marcados (distractor_type / why_wrong_or_right) ou nos tópicos das tentativas recentes, priorizando onde houve erro ou confusão conceitual.
+4. É PROIBIDO citar números de questões, alternativas (A, B, C, D, E), nomes de arquivos ou bancos de dados.`,
+    },
+    {
+      role: 'user',
+      content: `Últimas respostas compactas do estudante:\n${JSON.stringify(recentAnswers)}`,
+    },
+  ];
+
+  const modelsToTry = ['qwen/qwen3.8-27b', 'llama-3.3-70b-versatile'];
+
+  for (const model of modelsToTry) {
+    try {
+      const { text } = await callGroqModel(model, messages, groqApiKey, true, 0.45);
+      const parsed = extractSafeJson(text);
+      const rawList = Array.isArray(parsed?.suggestions) ? parsed.suggestions : [];
+      const cleanedList = rawList
+        .map((item) => sanitizeSuggestionItem(item))
+        .filter((item) => item.length > 0)
+        .slice(0, 3);
+
+      if (cleanedList.length === 3) {
+        const payload: CachedStriveSuggestionsPayload = {
+          suggestions: cleanedList,
+          totalAnswered,
+          lastAnswerTimestamp,
+        };
+        try {
+          localStorage.setItem(STRIVE_SUGGESTIONS_CACHE_KEY, JSON.stringify(payload));
+        } catch {
+          // Ignore quota errors
+        }
+        return cleanedList;
+      }
+    } catch {
+      // Tenta o próximo modelo de fallback silenciosamente
+    }
+  }
+
+  return cached?.suggestions?.length === 3 ? cached.suggestions : [...DEFAULT_STRIVE_SUGGESTIONS];
+}

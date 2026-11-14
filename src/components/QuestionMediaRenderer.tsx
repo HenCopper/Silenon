@@ -8,6 +8,7 @@ export interface QuestionMediaRendererProps {
   source?: string | null;
   type?: string;
   className?: string;
+  lazy?: boolean;
 }
 
 function detectRenderKind(url: string, explicitType?: string): 'audio' | 'video' | 'svg' | 'image' {
@@ -44,6 +45,7 @@ export const QuestionMediaRenderer: React.FC<QuestionMediaRendererProps> = ({
   source,
   type,
   className,
+  lazy = false,
 }) => {
   const [resolvedUrl, setResolvedUrl] = useState<string | null>(() => getCachedMediaUrlSync(url));
   const [isLoading, setIsLoading] = useState<boolean>(() => {
@@ -201,6 +203,7 @@ export const QuestionMediaRenderer: React.FC<QuestionMediaRendererProps> = ({
       alt={alt || undefined}
       source={source || undefined}
       className={className}
+      lazy={lazy}
     />
   );
 };

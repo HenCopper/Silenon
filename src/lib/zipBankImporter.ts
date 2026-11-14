@@ -1,7 +1,9 @@
-import JSZip from 'jszip';
+import type JSZip from 'jszip';
 import { Question, QuestionMedia, QuestionOption, AssociatedContext } from '../types/question';
 import { buildIdbMediaUrl, normalizeMediaPath, saveMediaBlobsBatch } from './mediaBlobStorage';
 import { normalizeQuestionToSchemaV2 } from './schemaV2Migrator';
+
+const yieldToMainThread = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 export interface ImportedZipBankResult {
   name: string;
@@ -539,7 +541,9 @@ function rewriteRootQuestionBankMedia(
 }
 
 export async function importQuestionBankFromZip(file: File): Promise<ImportedZipBankResult> {
-  const zip = await JSZip.loadAsync(file);
+  const JSZipModule = await import('jszip');
+  const JSZipConstructor = JSZipModule.default || JSZipModule;
+  const zip = await JSZipConstructor.loadAsync(file);
   const databaseId = `zip_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
 
   // Map non-directory zip entries ignoring common root wrapper folder if present
@@ -590,10 +594,16 @@ export async function importQuestionBankFromZip(file: File): Promise<ImportedZip
 
   // 2. Extract and store all media blobs in IndexedDB
   const mediaEntries: Array<{ path: string; blob: Blob; mimeType: string }> = [];
+  let mediaProcessedCount = 0;
   for (const [relPath, zipObj] of relativeToZipObject.entries()) {
     const ext = getFileExtension(relPath);
     const mimeType = MIME_BY_EXT[ext];
     if (!mimeType) continue;
+
+    mediaProcessedCount++;
+    if (mediaProcessedCount % 15 === 0) {
+      await yieldToMainThread();
+    }
 
     const rawBlob = await zipObj.async('blob');
     const typedBlob = rawBlob.type === mimeType ? rawBlob : new Blob([rawBlob], { type: mimeType });
@@ -614,10 +624,13 @@ export async function importQuestionBankFromZip(file: File): Promise<ImportedZip
     .filter(([relPath]) => /^questoes\/[^/]+\/questao\.json$/i.test(relPath))
     .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
 
-  let questions: Question[] = [];
+  const questions: Question[] = [];
 
   if (folderQuestionEntries.length > 0) {
     for (let i = 0; i < folderQuestionEntries.length; i++) {
+      if (i > 0 && i % 15 === 0) {
+        await yieldToMainThread();
+      }
       const [relPath, zipObj] = folderQuestionEntries[i];
       const folderPath = relPath.slice(0, relPath.lastIndexOf('/'));
       try {
@@ -673,19 +686,26 @@ export async function importQuestionBankFromZip(file: File): Promise<ImportedZip
           rawQ.is_annulled !== true
       );
 
-      questions = validRawList.map((rawQ: any, idx: number) => {
-        if (rawQ && (rawQ.enunciado !== undefined || rawQ.alternativas !== undefined)) {
-          return mapPortugueseQuestaoJsonToQuestion(
-            rawQ,
-            idx + 1,
-            '',
-            manifest.defaults,
-            databaseId,
-            availablePaths
-          );
+      for (let idx = 0; idx < validRawList.length; idx++) {
+        if (idx > 0 && idx % 15 === 0) {
+          await yieldToMainThread();
         }
-        return rewriteRootQuestionBankMedia(rawQ, idx + 1, databaseId, availablePaths);
-      });
+        const rawQ = validRawList[idx];
+        if (rawQ && (rawQ.enunciado !== undefined || rawQ.alternativas !== undefined)) {
+          questions.push(
+            mapPortugueseQuestaoJsonToQuestion(
+              rawQ,
+              idx + 1,
+              '',
+              manifest.defaults,
+              databaseId,
+              availablePaths
+            )
+          );
+        } else {
+          questions.push(rewriteRootQuestionBankMedia(rawQ, idx + 1, databaseId, availablePaths));
+        }
+      }
     }
   }
 

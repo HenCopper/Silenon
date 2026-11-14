@@ -3,7 +3,6 @@ import {
   Menu, 
   Flame, 
   Award, 
-  Keyboard, 
   Pause, 
   Play
 } from 'lucide-react';
@@ -48,7 +47,6 @@ export const Header: React.FC<HeaderProps> = ({
   stats,
   theme,
   onToggleTheme,
-  onOpenShortcuts,
   onOpenAppInfo,
   onOpenXPPerformance,
   errorCount = 0,
@@ -188,15 +186,6 @@ export const Header: React.FC<HeaderProps> = ({
                 <Award className="w-3.5 h-3.5 xp-badge-icon shrink-0" />
                 <span className="xp-badge-text">{stats.xp_points > 0 ? `${stats.xp_points} XP` : `${stats.today_xp} XP`}</span>
               </div>
-            </button>
-
-            {/* Keyboard Shortcuts */}
-            <button
-              onClick={onOpenShortcuts}
-              className="hidden xl:flex p-2 text-muted hover:text-primary hover:bg-surface-hover rounded-lg transition-colors shrink-0 cursor-pointer"
-              title="Atalhos de teclado (? ou AltGr+W)"
-            >
-              <Keyboard className="w-4 h-4" />
             </button>
 
             {/* Draggable Theme Toggle (Light -> Dark -> Reading -> Night; 3x click opens Dev mode) */}
