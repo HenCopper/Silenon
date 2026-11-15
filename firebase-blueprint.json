@@ -99,6 +99,49 @@
         }
       },
       "required": ["userId", "lastSyncedAt"]
+    },
+    "ReportEntry": {
+      "title": "ReportEntry",
+      "description": "User feedback, bug report, or developer contact submitted from /report",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "description": "Report action kind",
+          "maxLength": 40
+        },
+        "category": {
+          "type": "string",
+          "description": "Report category",
+          "maxLength": 40
+        },
+        "questionCode": {
+          "type": "string",
+          "description": "Optional question code or subject",
+          "maxLength": 300
+        },
+        "message": {
+          "type": "string",
+          "description": "User feedback or bug report message",
+          "maxLength": 4000
+        },
+        "debugDump": {
+          "type": "string",
+          "description": "Serialized diagnostic metadata",
+          "maxLength": 10000
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Creation timestamp in ISO format",
+          "maxLength": 60
+        },
+        "userAgent": {
+          "type": "string",
+          "description": "Browser user agent string",
+          "maxLength": 600
+        }
+      },
+      "required": ["kind", "category", "questionCode", "message", "debugDump", "createdAt", "userAgent"]
     }
   },
   "firestore": {
@@ -109,6 +152,10 @@
     "/users/{userId}/sync/{syncId}": {
       "schema": "UserSyncData",
       "description": "Synchronized study progress records for the user"
+    },
+    "/reports/{reportId}": {
+      "schema": "ReportEntry",
+      "description": "Submitted feedback and bug reports from /report"
     }
   }
 }

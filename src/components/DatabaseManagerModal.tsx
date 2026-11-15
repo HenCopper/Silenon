@@ -36,7 +36,7 @@ interface DatabaseManagerModalProps {
   onAddDatabase: (newDb: { name: string; filename?: string; databaseId?: string; questions: Question[] }, activateImmediately: boolean) => void;
   onRenameDatabase: (id: string, newName: string) => void;
   onDeleteDatabase: (id: string) => void;
-  onRestoreDefault: () => void;
+  onRestoreDefault: () => void | Promise<void>;
   onRestoreBackupSuccess: () => void;
 }
 
@@ -161,7 +161,7 @@ export const DatabaseManagerModal: React.FC<DatabaseManagerModalProps> = ({
         try {
           parsed = JSON.parse(text);
         } catch {
-          throw new Error('Arquivo não é um JSON válido.');
+          throw new Error('Arquivo de prova inválido.');
         }
 
         // 1. Check if this is a Full System Backup
@@ -200,7 +200,7 @@ export const DatabaseManagerModal: React.FC<DatabaseManagerModalProps> = ({
         } else if (parsed.questions && Array.isArray(parsed.questions)) {
           bank = parsed.questions;
         } else {
-          throw new Error('O JSON precisa conter a chave "question_bank" com array de questões ou ser um arquivo de backup.');
+          throw new Error('O arquivo precisa conter uma prova válida ou ser um backup do aplicativo.');
         }
 
         if (bank.length === 0) {
@@ -229,7 +229,7 @@ export const DatabaseManagerModal: React.FC<DatabaseManagerModalProps> = ({
         const errorMsg = err instanceof Error ? err.message : String(err);
         setFeedback({
           type: 'error',
-          message: errorMsg || 'Falha ao processar arquivo JSON.',
+          message: errorMsg || 'Falha ao processar o arquivo de prova.',
         });
       }
     };
@@ -359,7 +359,7 @@ export const DatabaseManagerModal: React.FC<DatabaseManagerModalProps> = ({
       URL.revokeObjectURL(url);
       setFeedback({
         type: 'success',
-        message: 'Backup completo de todos os bancos exportado com sucesso (.json)!',
+        message: 'Backup completo de todas as provas baixado com sucesso!',
       });
     } catch {
       setFeedback({
@@ -429,10 +429,10 @@ export const DatabaseManagerModal: React.FC<DatabaseManagerModalProps> = ({
               <Upload className="w-8 h-8" />
             </div>
             <p className="text-base font-bold text-primary mb-1">
-              Solte o arquivo JSON, pacote ZIP ou Backup aqui
+              Solte o arquivo de prova ou backup aqui
             </p>
             <p className="text-xs text-secondary max-w-sm leading-relaxed">
-              O Silenon detecta automaticamente pacotes de prova em ZIP (com mídias), bancos em JSON ou backups completos.
+              O Silenon detecta automaticamente pacotes de prova (com imagens), cadernos de questões ou backups completos.
             </p>
           </div>
         )}
@@ -445,7 +445,7 @@ export const DatabaseManagerModal: React.FC<DatabaseManagerModalProps> = ({
             </div>
             <div className="min-w-0">
               <h3 className="font-semibold text-base sm:text-lg text-primary leading-tight">
-                Gerenciador de Bancos JSON
+                Gerenciador de Provas
               </h3>
               {showTips && (
                 <p
@@ -642,7 +642,7 @@ export const DatabaseManagerModal: React.FC<DatabaseManagerModalProps> = ({
                   className="theme-btn-accent flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors shadow-xs cursor-pointer shrink-0 whitespace-nowrap"
                 >
                   <Upload className="w-3.5 h-3.5 shrink-0" />
-                  <span>Adicionar Prova (.JSON / .ZIP)</span>
+                  <span>Adicionar Prova</span>
                 </button>
               </div>
             </div>
@@ -742,10 +742,10 @@ export const DatabaseManagerModal: React.FC<DatabaseManagerModalProps> = ({
                 </div>
                 <div>
                   <p className="font-semibold text-xs text-primary">
-                    Nenhum banco de questões cadastrado
+                    Nenhuma prova cadastrada
                   </p>
                   <p className="text-[11px] text-muted mt-0.5">
-                    Adicione uma prova (.JSON ou .ZIP) ou restaure o banco padrão inicial
+                    Adicione um arquivo de prova ou restaure o banco padrão inicial
                   </p>
                 </div>
                 <div className="flex items-center justify-center gap-2 pt-1">
@@ -753,19 +753,32 @@ export const DatabaseManagerModal: React.FC<DatabaseManagerModalProps> = ({
                     onClick={() => fileInputRef.current?.click()}
                     className="theme-btn-accent px-3 py-1.5 rounded-lg text-xs font-medium cursor-pointer"
                   >
-                    Adicionar Prova (.JSON / .ZIP)
+                    Adicionar Prova
                   </button>
                   <button
-                    onClick={() => {
-                      onRestoreDefault();
-                      setFeedback({
-                        type: 'success',
-                        message: 'Banco padrão principal restaurado com sucesso.',
-                      });
+                    disabled={isProcessingFile}
+                    onClick={async () => {
+                      setIsProcessingFile(true);
+                      setFeedback(null);
+                      try {
+                        await onRestoreDefault();
+                        setFeedback({
+                          type: 'success',
+                          message: 'Bancos padrão (ENEM 2024 e ENEM 2025) restaurados com sucesso.',
+                        });
+                      } catch (err) {
+                        const msg = err instanceof Error ? err.message : 'Erro desconhecido';
+                        setFeedback({
+                          type: 'error',
+                          message: `Falha ao restaurar bancos padrão: ${msg}`,
+                        });
+                      } finally {
+                        setIsProcessingFile(false);
+                      }
                     }}
-                    className="theme-btn-secondary px-3 py-1.5 rounded-lg text-xs font-medium cursor-pointer"
+                    className="theme-btn-secondary px-3 py-1.5 rounded-lg text-xs font-medium cursor-pointer disabled:opacity-50"
                   >
-                    Restaurar Padrão
+                    {isProcessingFile ? 'Restaurando...' : 'Restaurar Padrão'}
                   </button>
                 </div>
               </div>
@@ -852,29 +865,43 @@ export const DatabaseManagerModal: React.FC<DatabaseManagerModalProps> = ({
             {showConfirmRestore && (
               <div className="p-3 bg-accent-subtle border border-accent/40 rounded-lg flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs animate-in fade-in duration-150">
                 <div className="text-accent leading-snug">
-                  Substituir todos os bancos pelo <strong className="font-semibold">banco padrão principal</strong>?
+                  Substituir todos os bancos pelos <strong className="font-semibold">bancos padrão (ENEM 2024 e ENEM 2025)</strong>?
                 </div>
                 <div className="flex items-center justify-between sm:justify-end gap-2 w-full sm:w-auto shrink-0">
                   <button
                     type="button"
+                    disabled={isProcessingFile}
                     onClick={() => setShowConfirmRestore(false)}
-                    className="theme-btn-secondary px-2.5 py-1 rounded text-xs font-medium cursor-pointer"
+                    className="theme-btn-secondary px-2.5 py-1 rounded text-xs font-medium cursor-pointer disabled:opacity-50"
                   >
                     Cancelar
                   </button>
                   <button
                     type="button"
-                    onClick={() => {
-                      onRestoreDefault();
-                      setShowConfirmRestore(false);
-                      setFeedback({
-                        type: 'success',
-                        message: 'Banco padrão principal restaurado com sucesso.',
-                      });
+                    disabled={isProcessingFile}
+                    onClick={async () => {
+                      setIsProcessingFile(true);
+                      setFeedback(null);
+                      try {
+                        await onRestoreDefault();
+                        setShowConfirmRestore(false);
+                        setFeedback({
+                          type: 'success',
+                          message: 'Bancos padrão (ENEM 2024 e ENEM 2025) restaurados com sucesso.',
+                        });
+                      } catch (err) {
+                        const msg = err instanceof Error ? err.message : 'Erro desconhecido';
+                        setFeedback({
+                          type: 'error',
+                          message: `Falha ao restaurar bancos padrão: ${msg}`,
+                        });
+                      } finally {
+                        setIsProcessingFile(false);
+                      }
                     }}
-                    className="px-3 py-1 bg-accent hover:opacity-90 text-accent-contrast rounded text-xs font-semibold shadow-xs cursor-pointer"
+                    className="px-3 py-1 bg-accent hover:opacity-90 text-accent-contrast rounded text-xs font-semibold shadow-xs cursor-pointer disabled:opacity-50"
                   >
-                    Confirmar Restauração
+                    {isProcessingFile ? 'Restaurando...' : 'Confirmar Restauração'}
                   </button>
                 </div>
               </div>

@@ -1,9 +1,33 @@
 import React, { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'motion/react';
-import { ExternalLink, Eye, EyeOff, X, Check, KeyRound } from 'lucide-react';
+import {
+  ExternalLink,
+  Eye,
+  EyeOff,
+  X,
+  Check,
+  KeyRound,
+  Lock,
+  Unlock,
+  ShieldCheck,
+  Loader2,
+  AlertCircle,
+} from 'lucide-react';
 import { GeminiIcon, GroqIcon } from './icons/BrandIcons';
 import { getAIKeys, saveAIKeys, getAccumulatedTokens } from '../lib/aiOrchestrator';
+import {
+  auth,
+  FirebaseUser,
+  saveEncryptedKeysToFirestore,
+  loadEncryptedKeysFromFirestore,
+  EncryptedKeysCloudPayload,
+} from '../lib/firebase';
+import {
+  encryptKeysWithPin,
+  decryptKeysWithPin,
+  isValidFourDigitPin,
+} from '../lib/cryptoVault';
 
 export const GEMINI_TUTORIAL_URL = 'https://youtu.be/7bgWVbZUxfI?si=gel7UMme_8bElyV8';
 export const GROQ_TUTORIAL_URL = 'https://youtu.be/LTIpLOe57iU?si=0cGMLfFZK_oGfFuu';
@@ -28,13 +52,60 @@ export const BYOKModal: React.FC<BYOKModalProps> = ({
   const [accumulatedTokens, setAccumulatedTokens] = useState(0);
   const [savedFeedback, setSavedFeedback] = useState(false);
 
+  // Cloud Encrypted Vault State (4-digit numeric PIN)
+  const [googleUser, setGoogleUser] = useState<FirebaseUser | null>(null);
+  const [cloudVault, setCloudVault] = useState<EncryptedKeysCloudPayload | null>(null);
+  const [isCheckingVault, setIsCheckingVault] = useState(false);
+  const [isUnlockPanelOpen, setIsUnlockPanelOpen] = useState(false);
+  const [unlockPin, setUnlockPin] = useState('');
+  const [savePin, setSavePin] = useState('');
+  const [isVaultBusy, setIsVaultBusy] = useState(false);
+  const [vaultError, setVaultError] = useState<string | null>(null);
+  const [vaultSuccess, setVaultSuccess] = useState<string | null>(null);
+
   useEffect(() => {
-    if (isOpen) {
-      const current = getAIKeys();
-      setGeminiApiKey(current.geminiApiKey);
-      setGroqApiKey(current.groqApiKey);
-      setAccumulatedTokens(getAccumulatedTokens());
-      setSavedFeedback(false);
+    if (!isOpen) return;
+
+    const current = getAIKeys();
+    setGeminiApiKey(current.geminiApiKey);
+    setGroqApiKey(current.groqApiKey);
+    setAccumulatedTokens(getAccumulatedTokens());
+    setSavedFeedback(false);
+    setUnlockPin('');
+    setSavePin('');
+    setVaultError(null);
+    setVaultSuccess(null);
+
+    const activeUser = auth.currentUser;
+    setGoogleUser(activeUser);
+
+    if (activeUser) {
+      let mounted = true;
+      setIsCheckingVault(true);
+      loadEncryptedKeysFromFirestore(activeUser.uid)
+        .then((vault) => {
+          if (!mounted) return;
+          setCloudVault(vault);
+          const hasBothLocal =
+            current.geminiApiKey.trim().length > 0 && current.groqApiKey.trim().length > 0;
+          if (vault && !hasBothLocal) {
+            setIsUnlockPanelOpen(true);
+          } else {
+            setIsUnlockPanelOpen(false);
+          }
+        })
+        .catch(() => {
+          if (mounted) setCloudVault(null);
+        })
+        .finally(() => {
+          if (mounted) setIsCheckingVault(false);
+        });
+      return () => {
+        mounted = false;
+      };
+    } else {
+      setCloudVault(null);
+      setIsUnlockPanelOpen(false);
     }
   }, [isOpen]);
 
@@ -44,26 +115,90 @@ export const BYOKModal: React.FC<BYOKModalProps> = ({
   const hasGroq = groqApiKey.trim().length > 0;
   const canSaveBothKeys = hasGemini && hasGroq;
 
-  const handleSave = (e: React.FormEvent) => {
+  const handleUnlockVault = async () => {
+    if (!cloudVault) return;
+    if (!isValidFourDigitPin(unlockPin)) {
+      setVaultError('Digite os 4 dígitos numéricos do seu PIN.');
+      return;
+    }
+
+    setIsVaultBusy(true);
+    setVaultError(null);
+    setVaultSuccess(null);
+
+    try {
+      const decrypted = await decryptKeysWithPin(cloudVault, unlockPin);
+      setGeminiApiKey(decrypted.geminiApiKey);
+      setGroqApiKey(decrypted.groqApiKey);
+      saveAIKeys(decrypted);
+      setVaultSuccess('Chaves restauradas com sucesso do cofre da sua Conta Google!');
+      setIsUnlockPanelOpen(false);
+      setUnlockPin('');
+      if (onSaved) onSaved();
+      setTimeout(() => {
+        onClose();
+      }, 650);
+    } catch (err: unknown) {
+      setVaultError(
+        err instanceof Error ? err.message : 'PIN incorreto ou falha ao descriptografar o cofre.'
+      );
+    } finally {
+      setIsVaultBusy(false);
+    }
+  };
+
+  const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!canSaveBothKeys) return;
-    saveAIKeys({
+    if (!canSaveBothKeys || isVaultBusy) return;
+
+    const cleanPin = savePin.trim();
+    if (cleanPin.length > 0 && !isValidFourDigitPin(cleanPin)) {
+      setVaultError(
+        'O PIN do cofre precisa ter exatamente 4 dígitos numéricos (ou deixe em branco para salvar apenas neste navegador).'
+      );
+      return;
+    }
+
+    setVaultError(null);
+    setVaultSuccess(null);
+
+    const cleanKeys = {
       geminiApiKey: geminiApiKey.trim(),
       groqApiKey: groqApiKey.trim(),
-    });
+    };
+
+    saveAIKeys(cleanKeys);
+
+    if (googleUser && isValidFourDigitPin(cleanPin)) {
+      setIsVaultBusy(true);
+      try {
+        const encryptedBlob = await encryptKeysWithPin(cleanKeys, cleanPin);
+        await saveEncryptedKeysToFirestore(googleUser.uid, encryptedBlob);
+        setVaultSuccess('Chaves salvas localmente e protegidas com PIN na sua Conta Google!');
+      } catch (err: unknown) {
+        setVaultError(
+          err instanceof Error
+            ? err.message
+            : 'Chaves salvas localmente, mas falhou ao sincronizar o cofre na nuvem.'
+        );
+        setIsVaultBusy(false);
+        return;
+      }
+      setIsVaultBusy(false);
+    }
+
     setSavedFeedback(true);
     if (onSaved) onSaved();
     setTimeout(() => {
       onClose();
-    }, 180);
+    }, 220);
   };
 
   return createPortal(
     <AnimatePresence>
       {isOpen && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 overflow-y-auto"
-          style={{ backgroundColor: 'rgba(0, 0, 0, 0.65)', backdropFilter: 'blur(6px)' }}
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 overflow-y-auto bg-canvas/80 backdrop-blur-xs"
           onClick={onClose}
         >
           <motion.div
@@ -72,7 +207,7 @@ export const BYOKModal: React.FC<BYOKModalProps> = ({
             exit={{ opacity: 0, scale: 0.94, y: 16 }}
             transition={{ type: 'spring', stiffness: 340, damping: 28 }}
             onClick={(e) => e.stopPropagation()}
-            className="relative w-full max-w-2xl theme-card bg-surface border border-border rounded-2xl p-6 sm:p-8 shadow-2xl space-y-6 my-auto"
+            className="relative w-full max-w-2xl theme-card bg-surface border border-border rounded-2xl p-6 sm:p-8 shadow-2xl space-y-5 my-auto"
           >
             {/* Close button */}
             <button
@@ -99,8 +234,99 @@ export const BYOKModal: React.FC<BYOKModalProps> = ({
               </p>
             </div>
 
+            {/* Cloud Vault Feedback Alerts */}
+            {vaultError && (
+              <div className="p-3 rounded-xl bg-danger-bg border border-danger-border text-danger text-xs flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{vaultError}</span>
+              </div>
+            )}
+
+            {vaultSuccess && (
+              <div className="p-3 rounded-xl bg-success-bg border border-success-border text-success text-xs flex items-center gap-2">
+                <Check className="w-4 h-4 shrink-0" />
+                <span>{vaultSuccess}</span>
+              </div>
+            )}
+
+            {/* Cloud Encrypted Vault Restore Banner (when user has encrypted_keys in Google Account) */}
+            {googleUser && cloudVault && (
+              <div className="rounded-xl border border-accent/40 bg-accent-subtle p-4 space-y-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="p-2 rounded-lg bg-accent text-accent-contrast shrink-0">
+                      <Lock className="w-4 h-4" />
+                    </div>
+                    <div className="min-w-0">
+                      <h3 className="text-xs sm:text-sm font-bold text-primary">
+                        Cofre Protegido na sua Conta Google
+                      </h3>
+                      <p className="text-[11px] text-secondary leading-snug">
+                        {isUnlockPanelOpen
+                          ? 'Digite seu PIN numérico de 4 dígitos para restaurar suas chaves de acesso neste aparelho.'
+                          : 'Suas chaves de acesso gratuitas (Google e Groq) estão salvas com PIN na nuvem.'}
+                      </p>
+                    </div>
+                  </div>
+
+                  {!isUnlockPanelOpen && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setVaultError(null);
+                        setIsUnlockPanelOpen(true);
+                      }}
+                      className="px-3 py-1.5 rounded-lg bg-surface hover:bg-surface-hover border border-border text-xs font-semibold text-primary transition-colors cursor-pointer shrink-0 flex items-center gap-1.5"
+                    >
+                      <Unlock className="w-3.5 h-3.5 text-accent" />
+                      <span>Restaurar com PIN</span>
+                    </button>
+                  )}
+                </div>
+
+                {isUnlockPanelOpen && (
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 pt-1">
+                    <input
+                      id="unlock-vault-pin-input"
+                      type="password"
+                      inputMode="numeric"
+                      pattern="[0-9]*"
+                      maxLength={4}
+                      value={unlockPin}
+                      onChange={(e) => {
+                        setVaultError(null);
+                        setUnlockPin(e.target.value.replace(/\D/g, '').slice(0, 4));
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          void handleUnlockVault();
+                        }
+                      }}
+                      placeholder="PIN de 4 dígitos (••••)"
+                      autoFocus={!canSaveBothKeys}
+                      className="flex-1 px-3 py-2 rounded-lg theme-input bg-surface border border-border text-xs font-mono tracking-widest text-center sm:text-left text-primary placeholder:text-muted focus:outline-none focus:border-accent"
+                    />
+                    <button
+                      type="button"
+                      disabled={unlockPin.length !== 4 || isVaultBusy}
+                      onClick={() => void handleUnlockVault()}
+                      className="px-4 py-2 rounded-lg theme-btn-accent text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+                    >
+                      {isVaultBusy ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Unlock className="w-3.5 h-3.5" />
+                      )}
+                      <span>Restaurar Chaves</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Interactive Side-by-Side Cards for Gemini & Groq */}
-            <form onSubmit={handleSave} className="space-y-6">
+            <form onSubmit={handleSave} className="space-y-5">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 {/* Google Gemini Card */}
                 <motion.div
@@ -151,7 +377,7 @@ export const BYOKModal: React.FC<BYOKModalProps> = ({
                   {/* Key Input */}
                   <div className="space-y-1.5">
                     <label htmlFor="gemini-api-key-input" className="block text-[11px] font-medium text-secondary">
-                      Chave Gemini API
+                      Chave de acesso gratuita (Google)
                     </label>
                     <div className="relative">
                       <input
@@ -224,7 +450,7 @@ export const BYOKModal: React.FC<BYOKModalProps> = ({
                   {/* Key Input */}
                   <div className="space-y-1.5">
                     <label htmlFor="groq-api-key-input" className="block text-[11px] font-medium text-secondary">
-                      Chave Groq API
+                      Chave de acesso gratuita (Groq)
                     </label>
                     <div className="relative">
                       <input
@@ -249,23 +475,69 @@ export const BYOKModal: React.FC<BYOKModalProps> = ({
                 </motion.div>
               </div>
 
+              {/* 4-Digit PIN Cloud Vault Save Section (when logged in with Google) */}
+              {googleUser && canSaveBothKeys && (
+                <div className="rounded-xl border border-border bg-surface-subtle p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="flex items-start gap-2.5 min-w-0">
+                    <ShieldCheck className="w-4 h-4 text-accent shrink-0 mt-0.5" />
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="text-xs font-semibold text-primary">
+                          Salvar no Cofre da Conta Google (PIN de 4 dígitos)
+                        </span>
+                        <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-surface border border-border text-muted">
+                          Protegido com PIN
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-muted mt-0.5 leading-snug">
+                        {cloudVault
+                          ? 'Digite um PIN de 4 dígitos para atualizar seu cofre na nuvem (ou deixe vazio para salvar só neste aparelho).'
+                          : 'Defina um PIN numérico de 4 dígitos para recuperar suas chaves em qualquer outro aparelho.'}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="w-full sm:w-44 shrink-0">
+                    <input
+                      id="save-vault-pin-input"
+                      type="password"
+                      inputMode="numeric"
+                      pattern="[0-9]*"
+                      maxLength={4}
+                      value={savePin}
+                      onChange={(e) => {
+                        setVaultError(null);
+                        setSavePin(e.target.value.replace(/\D/g, '').slice(0, 4));
+                      }}
+                      placeholder="PIN 4 dígitos"
+                      aria-label="PIN de 4 dígitos para criptografar chaves na nuvem"
+                      className="w-full px-3 py-2 text-xs font-mono tracking-widest text-center rounded-lg theme-input bg-surface border border-border text-primary placeholder:text-muted focus:outline-none focus:border-accent"
+                    />
+                  </div>
+                </div>
+              )}
+
               {/* Token usage info bar & Dual-Key Requirement Notice */}
               <div className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-2.5 rounded-xl bg-surface-subtle border border-border text-xs text-muted">
                 <div className="flex items-center gap-2">
                   <KeyRound className="w-3.5 h-3.5 text-accent shrink-0" />
                   <span>
-                    {!canSaveBothKeys
-                      ? !hasGemini && !hasGroq
-                        ? 'Preencha as duas chaves (Gemini e Groq) para habilitar o salvamento.'
-                        : !hasGemini
-                          ? 'Falta preencher a chave do Google Gemini para trabalhar junto com a Groq.'
-                          : 'Falta preencher a chave da Groq para trabalhar junto com o Google Gemini.'
-                      : 'As duas chaves estão prontas e ficam salvas apenas no seu navegador.'}
+                    {isCheckingVault
+                      ? 'Verificando cofre criptografado na Conta Google...'
+                      : !canSaveBothKeys
+                        ? !hasGemini && !hasGroq
+                          ? 'Preencha as duas chaves (Gemini e Groq) para habilitar o salvamento.'
+                          : !hasGemini
+                            ? 'Falta preencher a chave do Google Gemini para trabalhar junto com a Groq.'
+                            : 'Falta preencher a chave da Groq para trabalhar junto com o Google Gemini.'
+                        : savePin.length === 4 && googleUser
+                          ? 'As duas chaves serão salvas no navegador e criptografadas com seu PIN na nuvem.'
+                          : 'As duas chaves estão prontas e ficam salvas no seu navegador.'}
                   </span>
                 </div>
                 {accumulatedTokens > 0 && (
-                  <span className="font-mono text-[11px] text-secondary font-semibold">
-                    {accumulatedTokens.toLocaleString('pt-BR')} tokens processados
+                  <span className="text-[11px] text-secondary font-semibold">
+                    Chaves de acesso gratuitas (Google e Groq) • Progresso salvo no aparelho
                   </span>
                 )}
               </div>
@@ -299,11 +571,21 @@ export const BYOKModal: React.FC<BYOKModalProps> = ({
 
                 <button
                   type="submit"
-                  disabled={!canSaveBothKeys}
+                  disabled={!canSaveBothKeys || isVaultBusy}
                   className="inline-flex items-center justify-center gap-2 px-6 py-2.5 rounded-xl theme-btn-accent font-semibold text-xs sm:text-sm transition-all cursor-pointer shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
                 >
-                  <Check className="w-4 h-4" />
-                  <span>{savedFeedback ? 'Salvo!' : 'Salvar'}</span>
+                  {isVaultBusy ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Check className="w-4 h-4" />
+                  )}
+                  <span>
+                    {savedFeedback
+                      ? 'Salvo!'
+                      : savePin.length === 4 && googleUser
+                        ? 'Salvar + Cofre PIN'
+                        : 'Salvar'}
+                  </span>
                 </button>
               </div>
             </form>

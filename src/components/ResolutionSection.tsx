@@ -128,7 +128,10 @@ export const ResolutionSection: React.FC<ResolutionSectionProps> = ({
 
       {/* Pedagogical Explanation */}
       {pedagogicalContent && (
-        <div className="bg-surface-subtle border border-border rounded-lg p-4 space-y-2">
+        <div
+          data-question-selectable="true"
+          className="bg-surface-subtle border border-border rounded-lg p-4 space-y-2"
+        >
           <div className="flex items-center gap-1.5 text-accent text-xs font-semibold">
             <Sparkles className="w-3.5 h-3.5" />
             <span>Comentário Pedagógico</span>
@@ -173,7 +176,10 @@ export const ResolutionSection: React.FC<ResolutionSectionProps> = ({
         </button>
 
         {showCoT && (
-          <div className="p-4 bg-surface border-t border-border text-xs text-secondary theme-text-secondary leading-relaxed font-mono whitespace-pre-line space-y-2">
+          <div
+            data-question-selectable="true"
+            className="p-4 bg-surface border-t border-border text-xs text-secondary theme-text-secondary leading-relaxed font-mono whitespace-pre-line space-y-2"
+          >
             {cotContent ? (
               cotContent
             ) : (

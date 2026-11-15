@@ -1,14 +1,69 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
+import { Image as ImageIcon, Loader2, X } from 'lucide-react';
+import {
+  StriveGeneratedGraph,
+  computeGraphMarkerKey,
+  normalizeGraphShortTitle,
+} from '../lib/aiOrchestrator';
 
 interface MarkdownRendererProps {
   content: string;
   className?: string;
+  graphsByKey?: Record<string, StriveGeneratedGraph>;
 }
 
 export interface GlossaryEntry {
   term: string;
   definition: string;
+}
+
+interface ActiveGraphModalData {
+  title: string;
+  description: string;
+  svg: string;
+}
+
+type KatexModule = typeof import('katex');
+
+let katexModuleCache: KatexModule | null = null;
+let katexLoadPromise: Promise<KatexModule | null> | null = null;
+
+function ensureKatexLoaded(): Promise<KatexModule | null> {
+  if (katexModuleCache) {
+    return Promise.resolve(katexModuleCache);
+  }
+  if (!katexLoadPromise) {
+    katexLoadPromise = Promise.all([
+      import('katex'),
+      import('katex/dist/katex.min.css'),
+    ])
+      .then(([mod]) => {
+        katexModuleCache = (mod as any)?.default ? mod : mod;
+        return katexModuleCache;
+      })
+      .catch(() => {
+        katexLoadPromise = null;
+        return null;
+      });
+  }
+  return katexLoadPromise;
+}
+
+function renderLatexToHtml(formula: string, displayMode: boolean): string | null {
+  const cleanFormula = (formula || '').trim();
+  if (!cleanFormula || !katexModuleCache) return null;
+  try {
+    const katexApi = (katexModuleCache as any).default || katexModuleCache;
+    return katexApi.renderToString(cleanFormula, {
+      displayMode,
+      throwOnError: false,
+      strict: 'ignore',
+      output: 'htmlAndMathml',
+    });
+  } catch {
+    return null;
+  }
 }
 
 function escapeRegExp(str: string): string {
@@ -205,28 +260,188 @@ function extractGlossaryFromMarkdown(rawMarkdown: string): {
   };
 }
 
+interface InlineRenderContext {
+  graphsByKey?: Record<string, StriveGeneratedGraph>;
+  onOpenGraphModal?: (graph: ActiveGraphModalData) => void;
+}
+
+function renderGraphWidget(
+  rawTitle: string,
+  rawDescription: string,
+  key: string | number,
+  ctx?: InlineRenderContext,
+  forceLoading: boolean = false
+): React.ReactNode {
+  const shortTitle = normalizeGraphShortTitle(rawTitle);
+  const cleanDescription = (rawDescription || '')
+    .replace(/^["'“”«»\s]+|["'“”«»\s]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const markerKey = computeGraphMarkerKey(shortTitle, cleanDescription);
+  const graphEntry = ctx?.graphsByKey?.[markerKey];
+
+  const isReady =
+    !forceLoading &&
+    graphEntry &&
+    graphEntry.status === 'ready' &&
+    Boolean(graphEntry.svg && graphEntry.svg.trim());
+
+  if (!isReady || !graphEntry) {
+    return (
+      <span
+        key={key}
+        className="my-1.5 inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-surface-subtle border border-border text-xs text-secondary align-middle"
+      >
+        <Loader2 className="w-3.5 h-3.5 animate-spin text-accent shrink-0" />
+        <span className="font-medium text-primary">Carregando gráfico...</span>
+        {shortTitle && shortTitle !== 'Gráfico ilustrativo' && (
+          <span className="text-muted truncate max-w-[180px]">({shortTitle})</span>
+        )}
+      </span>
+    );
+  }
+
+  return (
+    <button
+      key={key}
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        ctx?.onOpenGraphModal?.({
+          title: graphEntry.title || shortTitle,
+          description: graphEntry.description || cleanDescription,
+          svg: graphEntry.svg,
+        });
+      }}
+      className="my-1.5 inline-flex items-center gap-2.5 px-3 py-2 rounded-xl bg-surface-subtle hover:bg-surface-hover border border-border text-left transition-colors cursor-pointer group max-w-full align-middle shadow-2xs"
+    >
+      <span className="w-7 h-7 rounded-lg bg-accent/15 border border-accent/30 flex items-center justify-center text-accent shrink-0 group-hover:scale-105 transition-transform">
+        <ImageIcon className="w-3.5 h-3.5" />
+      </span>
+      <span className="min-w-0 flex flex-col">
+        <span className="text-xs font-bold text-primary group-hover:text-accent transition-colors leading-tight">
+          Abrir imagem gráfica
+        </span>
+        <span className="text-[11px] text-muted truncate max-w-[230px] sm:max-w-[300px]">
+          {graphEntry.title || shortTitle}
+        </span>
+      </span>
+    </button>
+  );
+}
+
 /**
- * Renderizador de Markdown limpo e determinístico para respostas da IA no Memoriz.
+ * Renderizador de Markdown limpo e determinístico para respostas da IA no Silenon.
  * 100% aderente aos tokens semânticos (sem cores literais do Tailwind, sem dark:).
  */
-export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content, className = '' }) => {
+export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
+  content,
+  className = '',
+  graphsByKey,
+}) => {
+  const [, setKatexTick] = useState(0);
+  const [activeGraphModal, setActiveGraphModal] = useState<ActiveGraphModalData | null>(null);
+
+  const hasMath = Boolean(content && content.includes('$'));
+
+  useEffect(() => {
+    if (!hasMath || katexModuleCache) return;
+    let mounted = true;
+    ensureKatexLoaded().then((mod) => {
+      if (mounted && mod) {
+        setKatexTick((t) => t + 1);
+      }
+    });
+    return () => {
+      mounted = false;
+    };
+  }, [hasMath]);
+
+  useEffect(() => {
+    if (!activeGraphModal) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setActiveGraphModal(null);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [activeGraphModal]);
+
   if (!content) return null;
 
   const { cleanedMarkdown, glossary } = extractGlossaryFromMarkdown(content);
   const blocks = cleanedMarkdown ? parseMarkdownBlocks(cleanedMarkdown) : [];
 
+  const inlineCtx: InlineRenderContext = {
+    graphsByKey,
+    onOpenGraphModal: (graph) => setActiveGraphModal(graph),
+  };
+
   return (
-    <div className={`space-y-2.5 text-xs sm:text-sm leading-relaxed select-text ${className}`}>
-      {blocks.map((block, idx) => (
-        <React.Fragment key={idx}>{renderBlock(block, idx, glossary)}</React.Fragment>
-      ))}
-    </div>
+    <>
+      <div className={`space-y-2.5 text-xs sm:text-sm leading-relaxed select-text ${className}`}>
+        {blocks.map((block, idx) => (
+          <React.Fragment key={idx}>
+            {renderBlock(block, idx, glossary, inlineCtx)}
+          </React.Fragment>
+        ))}
+      </div>
+
+      {activeGraphModal &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <div
+            data-strive-graph-modal="true"
+            className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-canvas/85 backdrop-blur-xs animate-in fade-in duration-150"
+            onClick={() => setActiveGraphModal(null)}
+            role="dialog"
+            aria-modal="true"
+            aria-label={activeGraphModal.title}
+          >
+            <div
+              className="theme-modal relative w-full max-w-4xl max-h-[90vh] max-h-[90dvh] rounded-2xl border border-border bg-surface shadow-2xl p-4 sm:p-6 flex flex-col items-center overflow-y-auto"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="w-full flex items-center justify-between gap-3 mb-2">
+                <span className="text-xs sm:text-sm font-bold text-primary truncate">
+                  {activeGraphModal.title}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setActiveGraphModal(null)}
+                  className="p-1.5 rounded-lg text-muted hover:text-primary hover:bg-surface-hover transition-colors cursor-pointer shrink-0"
+                  aria-label="Fechar visualização do gráfico"
+                  title="Fechar (Esc)"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div
+                className="w-full flex items-center justify-center rounded-xl p-3 sm:p-5 bg-surface-subtle border border-border text-primary overflow-hidden"
+                dangerouslySetInnerHTML={{ __html: activeGraphModal.svg }}
+              />
+
+              {activeGraphModal.description && (
+                <div className="w-full mt-3 text-center">
+                  <p className="text-xs text-secondary leading-relaxed">
+                    {activeGraphModal.description}
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>,
+          document.body
+        )}
+    </>
   );
 };
 
 type BlockType =
   | { type: 'heading'; level: number; text: string }
   | { type: 'codeblock'; language: string; code: string }
+  | { type: 'mathblock'; formula: string }
   | { type: 'blockquote'; text: string }
   | { type: 'table'; headers: string[]; rows: string[][] }
   | { type: 'ul'; items: string[] }
@@ -265,6 +480,40 @@ function parseMarkdownBlocks(markdown: string): BlockType[] {
         type: 'codeblock',
         language,
         code: codeLines.join('\n'),
+      });
+      continue;
+    }
+
+    // 2.5. Math Block: $$ ... $$ (linha única ou múltiplas linhas)
+    if (trimmed.startsWith('$$')) {
+      if (trimmed.endsWith('$$') && trimmed.length > 4) {
+        blocks.push({
+          type: 'mathblock',
+          formula: trimmed.slice(2, -2).trim(),
+        });
+        i++;
+        continue;
+      }
+      const mathLines: string[] = [];
+      const firstLineRemainder = trimmed.slice(2).trim();
+      if (firstLineRemainder) {
+        mathLines.push(firstLineRemainder);
+      }
+      i++;
+      while (i < lines.length) {
+        const curTrim = lines[i].trim();
+        if (curTrim.endsWith('$$')) {
+          const beforeClose = curTrim.slice(0, -2).trim();
+          if (beforeClose) mathLines.push(beforeClose);
+          i++;
+          break;
+        }
+        mathLines.push(lines[i]);
+        i++;
+      }
+      blocks.push({
+        type: 'mathblock',
+        formula: mathLines.join('\n').trim(),
       });
       continue;
     }
@@ -355,6 +604,7 @@ function parseMarkdownBlocks(markdown: string): BlockType[] {
       i < lines.length &&
       lines[i].trim() &&
       !lines[i].trim().startsWith('```') &&
+      !lines[i].trim().startsWith('$$') &&
       !lines[i].trim().startsWith('#') &&
       !lines[i].trim().startsWith('>') &&
       !lines[i].trim().match(/^[-*]\s+/) &&
@@ -386,26 +636,31 @@ function isTableSeparator(line: string): boolean {
   return /^\|[\s\-:|]+\|$/.test(line);
 }
 
-function renderBlock(block: BlockType, key: number, glossary: GlossaryEntry[] = []) {
+function renderBlock(
+  block: BlockType,
+  key: number,
+  glossary: GlossaryEntry[] = [],
+  inlineCtx?: InlineRenderContext
+) {
   switch (block.type) {
     case 'heading': {
       if (block.level === 1) {
         return (
           <h1 key={key} className="text-base sm:text-lg font-bold text-primary mt-3 mb-1.5 border-b border-border pb-1">
-            {renderInlineMarkdown(block.text, glossary)}
+            {renderInlineMarkdown(block.text, glossary, inlineCtx)}
           </h1>
         );
       }
       if (block.level === 2) {
         return (
           <h2 key={key} className="text-sm sm:text-base font-bold text-primary mt-2.5 mb-1">
-            {renderInlineMarkdown(block.text, glossary)}
+            {renderInlineMarkdown(block.text, glossary, inlineCtx)}
           </h2>
         );
       }
       return (
         <h3 key={key} className="text-xs sm:text-sm font-semibold text-primary mt-2 mb-0.5">
-          {renderInlineMarkdown(block.text, glossary)}
+          {renderInlineMarkdown(block.text, glossary, inlineCtx)}
         </h3>
       );
     }
@@ -424,13 +679,34 @@ function renderBlock(block: BlockType, key: number, glossary: GlossaryEntry[] = 
         </div>
       );
 
+    case 'mathblock': {
+      const html = renderLatexToHtml(block.formula, true);
+      if (html) {
+        return (
+          <div
+            key={key}
+            className="my-2 py-1.5 px-2 overflow-x-auto text-center text-primary [&_.katex]:text-current"
+            dangerouslySetInnerHTML={{ __html: html }}
+          />
+        );
+      }
+      return (
+        <div
+          key={key}
+          className="my-2 py-1.5 px-3 rounded-lg bg-surface-subtle border border-border text-center font-mono text-xs text-primary overflow-x-auto"
+        >
+          {block.formula}
+        </div>
+      );
+    }
+
     case 'blockquote':
       return (
         <blockquote
           key={key}
           className="border-l-2 border-accent pl-3 py-1 my-2 bg-surface-subtle rounded-r-lg text-secondary italic"
         >
-          {renderInlineMarkdown(block.text, glossary)}
+          {renderInlineMarkdown(block.text, glossary, inlineCtx)}
         </blockquote>
       );
 
@@ -442,7 +718,7 @@ function renderBlock(block: BlockType, key: number, glossary: GlossaryEntry[] = 
               <tr>
                 {block.headers.map((h, hIdx) => (
                   <th key={hIdx} className="px-3 py-2 border-r border-border last:border-r-0">
-                    {renderInlineMarkdown(h, glossary)}
+                    {renderInlineMarkdown(h, glossary, inlineCtx)}
                   </th>
                 ))}
               </tr>
@@ -452,7 +728,7 @@ function renderBlock(block: BlockType, key: number, glossary: GlossaryEntry[] = 
                 <tr key={rIdx} className="hover:bg-surface-hover transition-colors">
                   {row.map((cell, cIdx) => (
                     <td key={cIdx} className="px-3 py-2 border-r border-border last:border-r-0 text-secondary">
-                      {renderInlineMarkdown(cell, glossary)}
+                      {renderInlineMarkdown(cell, glossary, inlineCtx)}
                     </td>
                   ))}
                 </tr>
@@ -466,7 +742,7 @@ function renderBlock(block: BlockType, key: number, glossary: GlossaryEntry[] = 
       return (
         <ul key={key} className="list-disc pl-5 space-y-1 my-1 text-primary">
           {block.items.map((item, itemIdx) => (
-            <li key={itemIdx}>{renderInlineMarkdown(item, glossary)}</li>
+            <li key={itemIdx}>{renderInlineMarkdown(item, glossary, inlineCtx)}</li>
           ))}
         </ul>
       );
@@ -475,7 +751,7 @@ function renderBlock(block: BlockType, key: number, glossary: GlossaryEntry[] = 
       return (
         <ol key={key} className="list-decimal pl-5 space-y-1 my-1 text-primary">
           {block.items.map((item, itemIdx) => (
-            <li key={itemIdx}>{renderInlineMarkdown(item, glossary)}</li>
+            <li key={itemIdx}>{renderInlineMarkdown(item, glossary, inlineCtx)}</li>
           ))}
         </ol>
       );
@@ -483,7 +759,7 @@ function renderBlock(block: BlockType, key: number, glossary: GlossaryEntry[] = 
     case 'paragraph':
       return (
         <p key={key} className="text-primary leading-relaxed">
-          {renderInlineMarkdown(block.text, glossary)}
+          {renderInlineMarkdown(block.text, glossary, inlineCtx)}
         </p>
       );
   }
@@ -560,6 +836,8 @@ function highlightGlossaryTermsInSegment(
 
 /**
  * Processa formatações inline:
+ * - Marcadores de gráfico [[GRAFICO: "Título" | "Descrição"]] (e marcador parcial em streaming)
+ * - LaTeX em bloco $$...$$ ou inline $...$ (preservado sem grifo de glossário)
  * - Código inline: `codigo` (preservado sem grifo de glossário)
  * - Negrito: **texto** ou __texto__
  * - Itálico: *texto* ou _texto_
@@ -568,7 +846,8 @@ function highlightGlossaryTermsInSegment(
  */
 export function renderInlineMarkdown(
   text: string,
-  glossary: GlossaryEntry[] = []
+  glossary: GlossaryEntry[] = [],
+  inlineCtx?: InlineRenderContext
 ): React.ReactNode[] {
   if (!text) return [];
 
@@ -577,13 +856,13 @@ export function renderInlineMarkdown(
       ? [...glossary].sort((a, b) => b.term.length - a.term.length)
       : [];
 
-  // Tokeniza sequencialmente por partes especiais
   const nodes: React.ReactNode[] = [];
   let remaining = text;
   let keyCounter = 0;
 
-  // Regex para achar próxima marcação inline especial
-  const inlineRegex = /(`[^`]+`|\*\*[^*]+\*\*|__[^_]+__|\*[^*]+\*|_[^_]+_|\[[^\]]+\]\([^)]+\))/;
+  // Regex unificada priorizando [[GRAFICO: ...]], $$...$$, $...$ e `code` antes de negrito/itálico
+  const inlineRegex =
+    /(\[\[\s*GR[AÁ]FICO\s*:\s*"?[^"|\]\n]+?"?\s*\|\s*"?[\s\S]*?"?\s*\]\]|\[\[\s*GR[AÁ]FICO\s*:[\s\S]*$|\$\$[\s\S]+?\$\$|\$(?!\s)[^$\n]+?(?<!\s)\$|`[^`]+`|\*\*[^*]+\*\*|__[^_]+__|\*[^*]+\*|_[^_]+_|\[[^\]]+\]\([^)]+\))/i;
 
   while (remaining.length > 0) {
     const match = remaining.match(inlineRegex);
@@ -594,7 +873,6 @@ export function renderInlineMarkdown(
       break;
     }
 
-    // Texto antes da marcação
     if (match.index > 0) {
       nodes.push(
         ...highlightGlossaryTermsInSegment(
@@ -608,8 +886,70 @@ export function renderInlineMarkdown(
     const token = match[0];
     const key = `inline_${keyCounter++}`;
 
-    // 1. Código inline `code` (nunca aplica grifo de glossário dentro de `code`)
-    if (token.startsWith('`') && token.endsWith('`')) {
+    // 1. Marcador completo [[GRAFICO: "Título" | "Descrição"]]
+    const fullGraphMatch = token.match(
+      /^\[\[\s*GR[AÁ]FICO\s*:\s*"?([^"|\]\n]+?)"?\s*\|\s*"?([\s\S]*?)"?\s*\]\]$/i
+    );
+    if (fullGraphMatch) {
+      nodes.push(
+        renderGraphWidget(fullGraphMatch[1], fullGraphMatch[2], key, inlineCtx, false)
+      );
+    }
+    // 1b. Marcador parcial [[GRAFICO:... ainda aberto no fim durante streaming
+    else if (/^\[\[\s*GR[AÁ]FICO\s*:/i.test(token)) {
+      const partialTitleMatch = token.match(/^\[\[\s*GR[AÁ]FICO\s*:\s*"?([^"|\]\n]{1,50})/i);
+      nodes.push(
+        renderGraphWidget(partialTitleMatch?.[1] || '', '', key, inlineCtx, true)
+      );
+    }
+    // 2. LaTeX Display $$...$$
+    else if (token.startsWith('$$') && token.endsWith('$$') && token.length > 4) {
+      const formula = token.slice(2, -2).trim();
+      const html = renderLatexToHtml(formula, true);
+      if (html) {
+        nodes.push(
+          <span
+            key={key}
+            className="block my-2 py-1 overflow-x-auto text-center text-primary [&_.katex]:text-current"
+            dangerouslySetInnerHTML={{ __html: html }}
+          />
+        );
+      } else {
+        nodes.push(
+          <code
+            key={key}
+            className="block my-1.5 px-2.5 py-1 rounded bg-surface-subtle border border-border text-center font-mono text-xs text-primary"
+          >
+            {formula}
+          </code>
+        );
+      }
+    }
+    // 3. LaTeX Inline $...$
+    else if (token.startsWith('$') && token.endsWith('$') && token.length > 2) {
+      const formula = token.slice(1, -1).trim();
+      const html = renderLatexToHtml(formula, false);
+      if (html) {
+        nodes.push(
+          <span
+            key={key}
+            className="inline-block align-middle mx-0.5 text-primary [&_.katex]:text-current"
+            dangerouslySetInnerHTML={{ __html: html }}
+          />
+        );
+      } else {
+        nodes.push(
+          <code
+            key={key}
+            className="px-1 py-0.5 rounded bg-surface-subtle border border-border text-[11px] font-mono text-primary"
+          >
+            {formula}
+          </code>
+        );
+      }
+    }
+    // 4. Código inline `code` (nunca aplica grifo de glossário dentro de `code`)
+    else if (token.startsWith('`') && token.endsWith('`')) {
       nodes.push(
         <code
           key={key}
@@ -619,7 +959,7 @@ export function renderInlineMarkdown(
         </code>
       );
     }
-    // 2. Negrito **bold** ou __bold__
+    // 5. Negrito **bold** ou __bold__
     else if (
       (token.startsWith('**') && token.endsWith('**')) ||
       (token.startsWith('__') && token.endsWith('__'))
@@ -627,11 +967,11 @@ export function renderInlineMarkdown(
       const innerText = token.slice(2, -2);
       nodes.push(
         <strong key={key} className="font-bold text-primary">
-          {highlightGlossaryTermsInSegment(innerText, sortedGlossary, `${key}_b`)}
+          {renderInlineMarkdown(innerText, sortedGlossary, inlineCtx)}
         </strong>
       );
     }
-    // 3. Itálico *italic* ou _italic_
+    // 6. Itálico *italic* ou _italic_
     else if (
       (token.startsWith('*') && token.endsWith('*')) ||
       (token.startsWith('_') && token.endsWith('_'))
@@ -639,11 +979,11 @@ export function renderInlineMarkdown(
       const innerText = token.slice(1, -1);
       nodes.push(
         <em key={key} className="italic text-secondary">
-          {highlightGlossaryTermsInSegment(innerText, sortedGlossary, `${key}_i`)}
+          {renderInlineMarkdown(innerText, sortedGlossary, inlineCtx)}
         </em>
       );
     }
-    // 4. Link [texto](url)
+    // 7. Link [texto](url)
     else if (token.startsWith('[') && token.includes('](') && token.endsWith(')')) {
       const linkMatch = token.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
       if (linkMatch) {
@@ -674,3 +1014,4 @@ export function renderInlineMarkdown(
 
   return nodes;
 }
+

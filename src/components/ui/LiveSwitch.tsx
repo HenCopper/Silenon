@@ -136,6 +136,7 @@ export const LiveSwitch: React.FC<LiveSwitchProps> = ({
           onChange(!checked);
         }
       }}
+      onClick={(e) => e.stopPropagation()}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}

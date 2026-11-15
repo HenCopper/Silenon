@@ -15,6 +15,12 @@ export interface AIMessage {
   content: string;
 }
 
+export interface AIAttachmentPayload {
+  mimeType: string;
+  data: string;
+  name?: string;
+}
+
 export type SocraticResponseType = 'fagulha' | 'pergunta_provocativa' | 'releitura_guiada';
 
 export interface SocraticDiagnosticResult {
@@ -24,6 +30,9 @@ export interface SocraticDiagnosticResult {
   spoken_response: string;
   model_used?: string;
   audio_dialog_model?: string;
+  audioBase64?: string;
+  mimeType?: string;
+  audioError?: string;
 }
 
 export const DEFAULT_GEMINI_MODEL = 'gemini-3.5-flash-lite';
@@ -78,7 +87,14 @@ export interface AIDiagnosticRequestLog {
   id: string;
   timestamp: number;
   isoTime: string;
-  flow: 'strive-chat' | 'quat-socratic' | 'learning-diagnosis' | 'quat-audio-dialog';
+  flow:
+    | 'strive-chat'
+    | 'quat-socratic'
+    | 'learning-diagnosis'
+    | 'quat-audio-dialog'
+    | 'svg-graph'
+    | 'strive-suggestions'
+    | string;
   requestedModel: string;
   resolvedModel: string;
   upstreamModelUsed?: string;
@@ -101,9 +117,32 @@ export interface AIDiagnosticRequestLog {
 export interface AIRuntimeErrorLog {
   timestamp: number;
   isoTime: string;
-  type: 'window.onerror' | 'unhandledrejection' | 'orchestrator';
+  type: 'window.onerror' | 'unhandledrejection' | 'console.error' | 'orchestrator';
   message: string;
   stack?: string;
+}
+
+export interface UniversalSessionLogEntry {
+  id: string;
+  timestamp: number;
+  isoTime: string;
+  category:
+    | 'network'
+    | 'ai-flow'
+    | 'console.error'
+    | 'window.onerror'
+    | 'unhandledrejection'
+    | 'runtime-error';
+  level: 'info' | 'warn' | 'error';
+  source: string;
+  url?: string;
+  method?: string;
+  status?: number;
+  model?: string;
+  durationMs?: number;
+  message: string;
+  error?: string;
+  attempts?: ServerAttemptTelemetry[];
 }
 
 interface OrchestratorTelemetryStore {
@@ -120,6 +159,7 @@ interface OrchestratorTelemetryStore {
   } | null;
   requestLogs: AIDiagnosticRequestLog[];
   runtimeErrors: AIRuntimeErrorLog[];
+  sessionUniversalLogs: UniversalSessionLogEntry[];
 }
 
 const telemetryStore: OrchestratorTelemetryStore = {
@@ -129,49 +169,173 @@ const telemetryStore: OrchestratorTelemetryStore = {
   lastError: null,
   requestLogs: [],
   runtimeErrors: [],
+  sessionUniversalLogs: [],
 };
 
+export function recordUniversalLog(
+  entry: Omit<UniversalSessionLogEntry, 'id' | 'timestamp' | 'isoTime'>
+): void {
+  const now = Date.now();
+  const fullEntry: UniversalSessionLogEntry = {
+    id: `ulog_${now}_${Math.random().toString(36).slice(2, 7)}`,
+    timestamp: now,
+    isoTime: new Date(now).toISOString(),
+    ...entry,
+  };
+  telemetryStore.sessionUniversalLogs.unshift(fullEntry);
+  if (telemetryStore.sessionUniversalLogs.length > 250) {
+    telemetryStore.sessionUniversalLogs.pop();
+  }
+}
+
+export function getSessionUniversalLogs(): UniversalSessionLogEntry[] {
+  return telemetryStore.sessionUniversalLogs;
+}
+
 export function recordOrchestratorRuntimeError(message: string, stack?: string): void {
+  const now = Date.now();
+  const isoTime = new Date(now).toISOString();
   telemetryStore.runtimeErrors.unshift({
-    timestamp: Date.now(),
-    isoTime: new Date().toISOString(),
+    timestamp: now,
+    isoTime,
     type: 'orchestrator',
     message,
     stack,
   });
-  if (telemetryStore.runtimeErrors.length > 40) {
+  if (telemetryStore.runtimeErrors.length > 60) {
     telemetryStore.runtimeErrors.pop();
   }
+  recordUniversalLog({
+    category: 'runtime-error',
+    level: 'error',
+    source: 'orchestrator',
+    message,
+    error: stack ? `${message}\n${stack}` : message,
+  });
 }
 
-// Install global runtime error listeners once in browser for comprehensive session debugging
+// Install global runtime error & console interceptors once in browser for universal automatic session debugging
 if (typeof window !== 'undefined') {
-  window.addEventListener('error', (event) => {
-    telemetryStore.runtimeErrors.unshift({
-      timestamp: Date.now(),
-      isoTime: new Date().toISOString(),
-      type: 'window.onerror',
-      message: event.message || String(event.error || 'Unknown window error'),
-      stack: event.error?.stack,
-    });
-    if (telemetryStore.runtimeErrors.length > 40) {
-      telemetryStore.runtimeErrors.pop();
-    }
-  });
+  try {
+    const winAny = window as any;
 
-  window.addEventListener('unhandledrejection', (event) => {
-    const reason = event.reason;
-    telemetryStore.runtimeErrors.unshift({
-      timestamp: Date.now(),
-      isoTime: new Date().toISOString(),
-      type: 'unhandledrejection',
-      message: reason?.message || String(reason || 'Unhandled promise rejection'),
-      stack: reason?.stack,
-    });
-    if (telemetryStore.runtimeErrors.length > 40) {
-      telemetryStore.runtimeErrors.pop();
+    if (!winAny.__silenonUniversalErrorListenersPatched) {
+      winAny.__silenonUniversalErrorListenersPatched = true;
+
+      try {
+        window.addEventListener('error', (event) => {
+          try {
+            const msg = event.message || String(event.error || 'Unknown window error');
+            const stack = event.error?.stack;
+            telemetryStore.runtimeErrors.unshift({
+              timestamp: Date.now(),
+              isoTime: new Date().toISOString(),
+              type: 'window.onerror',
+              message: msg,
+              stack,
+            });
+            if (telemetryStore.runtimeErrors.length > 60) {
+              telemetryStore.runtimeErrors.pop();
+            }
+            recordUniversalLog({
+              category: 'window.onerror',
+              level: 'error',
+              source: 'window.onerror',
+              message: msg,
+              error: stack ? `${msg}\n${stack}` : msg,
+            });
+          } catch {
+            // Ignore listener errors
+          }
+        });
+      } catch {
+        // Ignore non-configurable window error listener environments
+      }
+
+      try {
+        window.addEventListener('unhandledrejection', (event) => {
+          try {
+            const reason = event.reason;
+            const msg = reason?.message || String(reason || 'Unhandled promise rejection');
+            const stack = reason?.stack;
+            telemetryStore.runtimeErrors.unshift({
+              timestamp: Date.now(),
+              isoTime: new Date().toISOString(),
+              type: 'unhandledrejection',
+              message: msg,
+              stack,
+            });
+            if (telemetryStore.runtimeErrors.length > 60) {
+              telemetryStore.runtimeErrors.pop();
+            }
+            recordUniversalLog({
+              category: 'unhandledrejection',
+              level: 'error',
+              source: 'unhandledrejection',
+              message: msg,
+              error: stack ? `${msg}\n${stack}` : msg,
+            });
+          } catch {
+            // Ignore listener errors
+          }
+        });
+      } catch {
+        // Ignore non-configurable rejection listener environments
+      }
+
+      try {
+        const origConsoleError = console.error.bind(console);
+        console.error = (...args: any[]) => {
+          origConsoleError(...args);
+          try {
+            const formatted = args
+              .map((arg) => {
+                if (arg instanceof Error) {
+                  return arg.stack ? `${arg.message}\n${arg.stack}` : arg.message;
+                }
+                if (typeof arg === 'object' && arg !== null) {
+                  try {
+                    return JSON.stringify(arg);
+                  } catch {
+                    return String(arg);
+                  }
+                }
+                return String(arg);
+              })
+              .join(' ');
+
+            // Ignore noisy Vite HMR websocket warnings in preview iframe
+            if (formatted.includes('[vite] failed to connect to websocket')) {
+              return;
+            }
+
+            telemetryStore.runtimeErrors.unshift({
+              timestamp: Date.now(),
+              isoTime: new Date().toISOString(),
+              type: 'console.error',
+              message: formatted.slice(0, 1000),
+            });
+            if (telemetryStore.runtimeErrors.length > 60) {
+              telemetryStore.runtimeErrors.pop();
+            }
+            recordUniversalLog({
+              category: 'console.error',
+              level: 'error',
+              source: 'console.error',
+              message: formatted.slice(0, 300),
+              error: formatted,
+            });
+          } catch {
+            // Ignore logging recursion errors
+          }
+        };
+      } catch {
+        // Ignore read-only console environments
+      }
     }
-  });
+  } catch {
+    // Never let global debug instrumentation block app initialization
+  }
 }
 
 function recordRequestLog(entry: AIDiagnosticRequestLog): void {
@@ -179,11 +343,35 @@ function recordRequestLog(entry: AIDiagnosticRequestLog): void {
   if (telemetryStore.requestLogs.length > 50) {
     telemetryStore.requestLogs.pop();
   }
+  if (entry.outcome === 'error' && entry.errorMessage) {
+    telemetryStore.lastError = {
+      timestamp: entry.timestamp,
+      isoTime: entry.isoTime,
+      flow: entry.flow,
+      model: entry.resolvedModel || entry.requestedModel,
+      message: entry.errorMessage,
+      serverAttempts: entry.serverAttempts,
+    };
+  }
+  recordUniversalLog({
+    category: 'ai-flow',
+    level: entry.outcome === 'error' ? 'error' : entry.outcome === 'fallback' ? 'warn' : 'info',
+    source: entry.flow,
+    status: entry.httpStatus,
+    model: entry.upstreamModelUsed || entry.resolvedModel || entry.requestedModel,
+    durationMs: entry.durationMs,
+    message: `[${entry.flow}] ${entry.requestedModel} -> ${
+      entry.upstreamModelUsed || entry.resolvedModel
+    } (${entry.outcome.toUpperCase()}, ${entry.durationMs}ms)`,
+    error: entry.errorMessage,
+    attempts: entry.serverAttempts,
+  });
 }
 
 export function clearOrchestratorDebugLogs(): void {
   telemetryStore.requestLogs = [];
   telemetryStore.runtimeErrors = [];
+  telemetryStore.sessionUniversalLogs = [];
   telemetryStore.lastError = null;
 }
 
@@ -208,10 +396,12 @@ export function getOrchestratorDebugSnapshot() {
     architectureRoles: {
       strivePrimaryBoost: `${HIGH_GEMINI_MODEL_4_HYDROGEN} -> ${HIGH_GEMINI_MODEL_38} (20 RPD) -> ${HIGH_GEMINI_MODEL_36} (20 RPD) [thinkingLevel: HIGH]`,
       striveStandardFallback: `${DEFAULT_GEMINI_MODEL} -> ${EXTREME_FALLBACK_GEMINI_MODEL}`,
+      striveLiveVoiceTTS: 'gemini-3.8-live -> gemini-2.5-flash-native-audio-preview-12-2025 -> gemini-2.5-flash-native-audio-preview-09-2025',
       quatVoiceCaptureAndTTS: QUAT_NATIVE_AUDIO_DIALOG_MODEL,
       quatSocraticBrain: `${GROQ_PRIMARY_MODEL} -> ${GROQ_FALLBACK_MODELS.join(' -> ')}`,
     },
     lastError: telemetryStore.lastError,
+    sessionUniversalLogs: telemetryStore.sessionUniversalLogs,
     requestLogs: telemetryStore.requestLogs,
     runtimeErrors: telemetryStore.runtimeErrors,
   };
@@ -400,7 +590,124 @@ export function isRpmRateLimit(errorMsg: string): boolean {
 export const AI_REQUEST_TIMEOUT_MS = 15000;
 export const AI_HIGH_THINKING_TIMEOUT_MS = 45000;
 
-export async function fetchWithTimeout(
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+export interface StudentFriendlyError {
+  code: string;
+  title: string;
+  message: string;
+  displayText: string;
+  rawDetail: string;
+}
+
+/**
+ * Traduz erros técnicos brutos em mensagens temáticas amigáveis do universo Silenon
+ * para a interface do estudante, enquanto registra o erro técnico completo no Debug Panel (F9).
+ */
+export function mapToStudentFriendlyError(rawError: unknown): StudentFriendlyError {
+  const rawDetail =
+    rawError instanceof Error
+      ? rawError.message
+      : typeof rawError === 'string'
+      ? rawError
+      : (() => {
+          try {
+            return JSON.stringify(rawError ?? 'Erro desconhecido');
+          } catch {
+            return String(rawError ?? 'Erro desconhecido');
+          }
+        })();
+
+  const rawStack = rawError instanceof Error ? rawError.stack : undefined;
+  recordOrchestratorRuntimeError(`[StudentFriendlyError] ${rawDetail}`, rawStack);
+
+  const lower = rawDetail.toLowerCase();
+
+  let code = 'SLN-05';
+  let title = 'Circuito Instável';
+  let message =
+    'Tivemos uma instabilidade temporária por aqui. Tente novamente em alguns segundos.';
+
+  if (
+    lower.includes('starting server') ||
+    lower.includes('<!doctype html') ||
+    lower.includes('<html') ||
+    lower.includes('text/html')
+  ) {
+    code = 'SLN-14';
+    title = 'Silício Adormecido';
+    message = 'Nossa central ainda está despertando. Tente novamente em alguns segundos.';
+  } else if (
+    lower.includes('401') ||
+    lower.includes('403') ||
+    lower.includes('byok') ||
+    lower.includes('api key') ||
+    lower.includes('apikey') ||
+    lower.includes('chave') ||
+    lower.includes('unauthorized') ||
+    lower.includes('forbidden') ||
+    lower.includes('unauthenticated') ||
+    lower.includes('invalid_api_key')
+  ) {
+    code = 'SLN-04';
+    title = 'Chave Desencaixada';
+    message = 'Sua chave de acesso precisa ser conferida nas configurações.';
+  } else if (
+    lower.includes('429') ||
+    lower.includes('rate limit') ||
+    lower.includes('rate_limit') ||
+    lower.includes('quota') ||
+    lower.includes('resource_exhausted') ||
+    lower.includes('too many requests') ||
+    lower.includes('rpm') ||
+    lower.includes('tpm') ||
+    lower.includes('rpd')
+  ) {
+    code = 'SLN-03';
+    title = 'Carga Esgotada';
+    message = 'Muitos pedidos seguidos por agora. Aguarde um instante e tente novamente.';
+  } else if (
+    lower.includes('timeout') ||
+    lower.includes('tempo limite') ||
+    lower.includes('failed to fetch') ||
+    lower.includes('networkerror') ||
+    lower.includes('falha de rede') ||
+    lower.includes('sem conexão') ||
+    lower.includes('offline') ||
+    lower.includes('internet') ||
+    lower.includes('econnrefused')
+  ) {
+    code = 'SLN-02';
+    title = 'Sinal Perdido';
+    message = 'A conexão demorou para responder. Verifique sua internet e tente de novo.';
+  } else if (
+    lower.includes('live api') ||
+    lower.includes('audiobase64') ||
+    lower.includes('audio-dialog') ||
+    lower.includes('síntese de voz') ||
+    lower.includes('sintetizar a voz') ||
+    lower.includes('nenhum áudio') ||
+    lower.includes('fechou sem áudio') ||
+    lower.includes('áudio wav vazio') ||
+    lower.includes('reproduzir o fluxo de áudio') ||
+    lower.includes('reproduzir o áudio') ||
+    lower.includes('strive tts')
+  ) {
+    code = 'SLN-01';
+    title = 'Cristal Sem Voz';
+    message = 'Não consegui gerar a voz desta vez. Tente novamente em instantes.';
+  }
+
+  return {
+    code,
+    title,
+    message,
+    displayText: `${title} (${code}) — ${message}`,
+    rawDetail,
+  };
+}
+
+async function performSingleFetchWithTimeout(
   url: string,
   options: RequestInit,
   timeoutMs: number = AI_REQUEST_TIMEOUT_MS
@@ -410,26 +717,201 @@ export async function fetchWithTimeout(
     controller.abort();
   }, timeoutMs);
 
+  const t0 = Date.now();
+  const method = (options?.method || 'GET').toUpperCase();
+  let reqModel: string | undefined;
+  let reqAction: string | undefined;
+
+  if (typeof options?.body === 'string' && options.body.trim().startsWith('{')) {
+    try {
+      const parsedReq = JSON.parse(options.body);
+      if (typeof parsedReq?.model === 'string') reqModel = parsedReq.model;
+      if (typeof parsedReq?.action === 'string') reqAction = parsedReq.action;
+      if (!reqModel && reqAction === 'speak') reqModel = 'gemini-3.8-live';
+      if (!reqModel && reqAction === 'transcribe') reqModel = QUAT_NATIVE_AUDIO_DIALOG_MODEL;
+    } catch {
+      // Ignore body parse errors
+    }
+  }
+
+  const inferSource = () => {
+    if (url.includes('/api/gemini/audio-dialog')) {
+      return `quat-audio-dialog:${reqAction || 'request'}`;
+    }
+    if (url.includes('/api/gemini/generate')) return 'gemini-generate';
+    if (url.includes('/api/gemini/stream')) return 'gemini-stream';
+    if (url.includes('/api/groq/chat') || url.includes('api.groq.com')) return 'groq-api';
+    if (url.includes('/api/report')) return '/api/report';
+    if (url.includes('/api/diagnostic-report')) return '/api/diagnostic-report';
+    return `fetch:${method}`;
+  };
+
   try {
     const response = await fetch(url, {
       ...options,
       signal: controller.signal,
     });
+
+    const durationMs = Date.now() - t0;
+    try {
+      const cloned = response.clone();
+      cloned
+        .text()
+        .then((rawText) => {
+          let parsedRes: any = null;
+          if (rawText && rawText.trim().startsWith('{')) {
+            try {
+              parsedRes = JSON.parse(rawText);
+            } catch {
+              parsedRes = null;
+            }
+          }
+          const resolvedModel =
+            parsedRes?.upstreamModelUsed || parsedRes?.modelUsed || parsedRes?.model || reqModel;
+          const attempts: ServerAttemptTelemetry[] | undefined = Array.isArray(parsedRes?.attempts)
+            ? parsedRes.attempts
+            : Array.isArray(parsedRes?.debugMeta?.attempts)
+            ? parsedRes.debugMeta.attempts
+            : undefined;
+          const contentTypeHeader = response.headers.get('content-type') || '';
+          const isUnexpectedHtml =
+            url.startsWith('/api/') &&
+            (contentTypeHeader.toLowerCase().includes('text/html') ||
+              /starting server\.\.\.|<!doctype html>/i.test(rawText));
+          const errDetail =
+            parsedRes?.rawError ||
+            parsedRes?.error?.message ||
+            (typeof parsedRes?.error === 'string' ? parsedRes.error : undefined) ||
+            (!response.ok || isUnexpectedHtml ? rawText.slice(0, 600) : undefined);
+
+          recordUniversalLog({
+            category: 'network',
+            level: response.ok && !isUnexpectedHtml ? 'info' : 'error',
+            source: inferSource(),
+            url,
+            method,
+            status: response.status,
+            model: resolvedModel,
+            durationMs,
+            message: `${method} ${url} -> HTTP ${response.status}${
+              resolvedModel ? ` [${resolvedModel}]` : ''
+            }${isUnexpectedHtml ? ' [WARMUP/HTML]' : ''} (${durationMs}ms)`,
+            error: errDetail,
+            attempts,
+          });
+        })
+        .catch(() => {
+          recordUniversalLog({
+            category: 'network',
+            level: response.ok ? 'info' : 'error',
+            source: inferSource(),
+            url,
+            method,
+            status: response.status,
+            model: reqModel,
+            durationMs,
+            message: `${method} ${url} -> HTTP ${response.status} (${durationMs}ms)`,
+          });
+        });
+    } catch {
+      // Ignore response clone failures
+    }
+
     return response;
   } catch (err: any) {
-    if (err?.name === 'AbortError' || controller.signal.aborted) {
-      const timeoutSeconds = Math.round(timeoutMs / 1000);
-      throw new Error(
-        `Tempo limite de ${timeoutSeconds}s (${timeoutMs}ms) excedido na comunicação com a IA.`
-      );
-    }
-    throw err;
+    const durationMs = Date.now() - t0;
+    const isAbort = err?.name === 'AbortError' || controller.signal.aborted;
+    const timeoutSeconds = Math.round(timeoutMs / 1000);
+    const finalErr = isAbort
+      ? new Error(
+          `Tempo limite de ${timeoutSeconds}s (${timeoutMs}ms) excedido na comunicação com a IA.`
+        )
+      : err;
+
+    recordUniversalLog({
+      category: 'network',
+      level: 'error',
+      source: inferSource(),
+      url,
+      method,
+      status: 0,
+      model: reqModel,
+      durationMs,
+      message: `${method} ${url} -> ${isAbort ? 'TIMEOUT' : 'FALHA DE REDE'} (${durationMs}ms)`,
+      error: finalErr?.message || String(finalErr),
+    });
+
+    throw finalErr;
   } finally {
     clearTimeout(timeoutId);
   }
 }
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * Helper de retry automático para rotas `/api/*` enquanto o servidor Node está iniciando
+ * (quando o proxy devolve `text/html` com `Starting Server...` ou `<!doctype html>`).
+ */
+export async function fetchApiWithWarmupRetry(
+  url: string,
+  options: RequestInit,
+  timeoutMs: number = AI_REQUEST_TIMEOUT_MS,
+  maxExtraRetries: number = 3
+): Promise<Response> {
+  const isApiRoute = url.startsWith('/api/');
+  const totalRetries = isApiRoute ? Math.max(0, maxExtraRetries) : 0;
+
+  for (let attempt = 0; attempt <= totalRetries; attempt++) {
+    const response = await performSingleFetchWithTimeout(url, options, timeoutMs);
+    if (!isApiRoute || attempt === totalRetries) {
+      return response;
+    }
+
+    const contentType = (response.headers.get('content-type') || '').toLowerCase();
+    let isWarmupHtml = contentType.includes('text/html');
+
+    if (!isWarmupHtml) {
+      try {
+        const previewText = await response.clone().text();
+        if (/starting server\.\.\.|<!doctype html>/i.test(previewText)) {
+          isWarmupHtml = true;
+        }
+      } catch {
+        // Ignore clone read error
+      }
+    }
+
+    if (!isWarmupHtml) {
+      return response;
+    }
+
+    recordUniversalLog({
+      category: 'network',
+      level: 'warn',
+      source: 'server-warmup-retry',
+      url,
+      method: (options?.method || 'GET').toUpperCase(),
+      status: response.status,
+      message: `Servidor iniciando em ${url} (Content-Type=${contentType || 'html'}) — tentativa extra ${
+        attempt + 1
+      }/${totalRetries} após 2500ms...`,
+    });
+
+    await sleep(2500);
+  }
+
+  return performSingleFetchWithTimeout(url, options, timeoutMs);
+}
+
+export async function fetchWithTimeout(
+  url: string,
+  options: RequestInit,
+  timeoutMs: number = AI_REQUEST_TIMEOUT_MS
+): Promise<Response> {
+  if (url.startsWith('/api/')) {
+    return fetchApiWithWarmupRetry(url, options, timeoutMs, 3);
+  }
+  return performSingleFetchWithTimeout(url, options, timeoutMs);
+}
 
 /**
  * Emits real-time phased status messages, guaranteeing EVERY status string contains the active model name.
@@ -749,7 +1231,8 @@ async function callGeminiModel(
   apiKey: string,
   jsonMode: boolean = false,
   thinkingLevel?: 'HIGH' | 'MEDIUM' | 'LOW' | 'high' | 'medium' | 'low',
-  customTimeoutMs?: number
+  customTimeoutMs?: number,
+  attachments?: AIAttachmentPayload[]
 ): Promise<GeminiCallResponse> {
   const cleanKey = (apiKey || '').trim();
   if (!cleanKey) {
@@ -780,6 +1263,7 @@ async function callGeminiModel(
         jsonMode,
         apiKey: cleanKey,
         ...(normalizedThinking ? { thinkingLevel: normalizedThinking } : {}),
+        ...(Array.isArray(attachments) && attachments.length > 0 ? { attachments } : {}),
       }),
     },
     effectiveTimeoutMs
@@ -832,84 +1316,186 @@ export async function notifyQuatNativeAudioDialog(params: {
   audioBase64?: string;
   mimeType?: string;
   textToSpeak?: string;
-}): Promise<{ transcript?: string; spokenText?: string; modelUsed: string }> {
+}): Promise<{
+  transcript?: string;
+  spokenText?: string;
+  audioBase64?: string;
+  mimeType?: string;
+  modelUsed: string;
+  upstreamModelUsed?: string;
+  error?: string;
+  attempts?: ServerAttemptTelemetry[];
+}> {
   const { geminiApiKey } = getAIKeys();
   const cleanKey = (geminiApiKey || '').trim();
+  const targetModel =
+    params.action === 'speak' ? 'gemini-2.5-flash-preview-tts' : QUAT_NATIVE_AUDIO_DIALOG_MODEL;
   if (!cleanKey) {
+    const missingKeyMsg = 'Chave Gemini (BYOK) ausente para síntese/transcrição de voz.';
+    recordOrchestratorRuntimeError(`[quat-audio-dialog:${params.action}] ${missingKeyMsg}`);
     return {
       transcript: '',
       spokenText: params.textToSpeak || '',
-      modelUsed: QUAT_NATIVE_AUDIO_DIALOG_MODEL,
+      modelUsed: targetModel,
+      error: missingKeyMsg,
     };
   }
 
   const t0 = Date.now();
   const statusTransitions: string[] = [
-    `${new Date().toISOString().slice(11, 23)} — Conectando ao ${QUAT_NATIVE_AUDIO_DIALOG_MODEL}...`,
+    `${new Date().toISOString().slice(11, 23)} — Conectando ao ${targetModel} (${params.action})...`,
   ];
 
   try {
-    const response = await fetchWithTimeout('/api/gemini/audio-dialog', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-gemini-api-key': cleanKey,
+    const response = await fetchWithTimeout(
+      '/api/gemini/audio-dialog',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-gemini-api-key': cleanKey,
+        },
+        body: JSON.stringify({
+          ...params,
+          apiKey: cleanKey,
+        }),
       },
-      body: JSON.stringify({
-        ...params,
-        apiKey: cleanKey,
-      }),
-    });
+      params.action === 'speak' ? 45000 : AI_REQUEST_TIMEOUT_MS
+    );
 
-    const data = await response.json().catch(() => ({}));
+    const rawText = await response.text();
+    const contentType = response.headers.get('content-type') || 'desconhecido';
+    let data: any = null;
+    if (!rawText || !rawText.trim()) {
+      const emptyBodyMsg = `Resposta não-JSON em /api/gemini/audio-dialog (HTTP ${response.status}, Content-Type=${contentType}): [corpo vazio]`;
+      recordOrchestratorRuntimeError(emptyBodyMsg);
+      const parseErr: any = new Error(emptyBodyMsg);
+      parseErr.status = response.status;
+      parseErr.responsePreview = `non-json (HTTP ${response.status}, Content-Type=${contentType}): [corpo vazio]`;
+      throw parseErr;
+    }
+    try {
+      data = JSON.parse(rawText);
+    } catch (jsonErr: any) {
+      const nonJsonMsg = `Resposta não-JSON em /api/gemini/audio-dialog (HTTP ${response.status}, Content-Type=${contentType}): ${rawText.slice(0, 200) || '[corpo vazio]'}`;
+      recordOrchestratorRuntimeError(nonJsonMsg, jsonErr?.stack);
+      const parseErr: any = new Error(nonJsonMsg);
+      parseErr.status = response.status;
+      parseErr.responsePreview = `non-json (HTTP ${response.status}, Content-Type=${contentType}): ${rawText.slice(0, 120)}`;
+      throw parseErr;
+    }
+
+    const responseKeys =
+      data && typeof data === 'object' ? Object.keys(data) : [];
+    const serverAttempts: ServerAttemptTelemetry[] | undefined = Array.isArray(data?.attempts)
+      ? data.attempts
+      : Array.isArray(data?.debugMeta?.attempts)
+      ? data.debugMeta.attempts
+      : undefined;
+
+    const audioBase64Str =
+      typeof data?.audioBase64 === 'string' ? data.audioBase64.trim() : '';
+    const audioSizeKb = audioBase64Str
+      ? Math.max(1, Math.round((audioBase64Str.length * 3) / 4 / 1024))
+      : 0;
+    const audioPreviewLabel =
+      params.action === 'speak'
+        ? audioBase64Str
+          ? `audio=OK (${audioSizeKb}KB) | keys=[${responseKeys.join(',')}]`
+          : `audio=EMPTY | keys=[${responseKeys.join(',')}]`
+        : (data?.transcript || data?.spokenText || '').slice(0, 120);
+
+    if (!response.ok) {
+      const errDetail = data?.error || `HTTP ${response.status} em /api/gemini/audio-dialog`;
+      const errObj: any = new Error(errDetail);
+      errObj.status = response.status;
+      errObj.attempts = serverAttempts;
+      errObj.responsePreview = audioPreviewLabel;
+      throw errObj;
+    }
+
+    if (params.action === 'speak' && !audioBase64Str) {
+      const emptyErr: any = new Error(
+        `Resposta sem audioBase64 em /api/gemini/audio-dialog (HTTP ${response.status} | keys=[${responseKeys.join(',')}]).`
+      );
+      emptyErr.status = 502;
+      emptyErr.attempts = serverAttempts;
+      emptyErr.responsePreview = audioPreviewLabel;
+      throw emptyErr;
+    }
+
     recordRequestLog({
       id: `req_${Date.now()}_audio`,
       timestamp: Date.now(),
       isoTime: new Date().toISOString(),
-      flow: 'quat-audio-dialog',
-      requestedModel: QUAT_NATIVE_AUDIO_DIALOG_MODEL,
-      resolvedModel: data?.modelUsed || QUAT_NATIVE_AUDIO_DIALOG_MODEL,
+      flow: `quat-audio-dialog:${params.action}`,
+      requestedModel: targetModel,
+      resolvedModel: data?.modelUsed || targetModel,
       upstreamModelUsed: data?.upstreamModelUsed,
       durationMs: Date.now() - t0,
       httpStatus: response.status,
-      outcome: response.ok ? 'success' : 'error',
+      outcome: 'success',
       statusTransitions,
+      serverAttempts,
       requestSummary: {
         messageCount: 1,
         systemPromptLength: 0,
-        userPreview: params.action === 'speak' ? (params.textToSpeak || '').slice(0, 80) : '[Audio Stream]',
+        userPreview:
+          params.action === 'speak' ? (params.textToSpeak || '').slice(0, 80) : '[Audio Stream]',
         jsonMode: false,
       },
-      responsePreview: (data?.transcript || data?.spokenText || '').slice(0, 120),
+      responsePreview: audioPreviewLabel,
     });
 
     return {
       transcript: data?.transcript,
       spokenText: data?.spokenText || params.textToSpeak,
-      modelUsed: QUAT_NATIVE_AUDIO_DIALOG_MODEL,
+      audioBase64: audioBase64Str || undefined,
+      mimeType: typeof data?.mimeType === 'string' ? data.mimeType : undefined,
+      modelUsed: data?.modelUsed || targetModel,
+      upstreamModelUsed: data?.upstreamModelUsed,
+      attempts: serverAttempts,
     };
   } catch (err: any) {
+    const errMsg = err?.message || String(err);
+    const serverAttempts: ServerAttemptTelemetry[] | undefined = Array.isArray(err?.attempts)
+      ? err.attempts
+      : undefined;
+
     recordRequestLog({
       id: `req_${Date.now()}_audio_err`,
       timestamp: Date.now(),
       isoTime: new Date().toISOString(),
-      flow: 'quat-audio-dialog',
-      requestedModel: QUAT_NATIVE_AUDIO_DIALOG_MODEL,
-      resolvedModel: QUAT_NATIVE_AUDIO_DIALOG_MODEL,
+      flow: `quat-audio-dialog:${params.action}`,
+      requestedModel: targetModel,
+      resolvedModel: targetModel,
       durationMs: Date.now() - t0,
+      httpStatus: typeof err?.status === 'number' ? err.status : 502,
       outcome: 'error',
       statusTransitions,
-      errorMessage: err?.message || String(err),
+      serverAttempts,
+      errorMessage: errMsg,
       requestSummary: {
         messageCount: 1,
         systemPromptLength: 0,
-        userPreview: params.action,
+        userPreview:
+          params.action === 'speak'
+            ? (params.textToSpeak || '').slice(0, 80)
+            : params.action,
         jsonMode: false,
       },
+      responsePreview:
+        typeof err?.responsePreview === 'string'
+          ? err.responsePreview
+          : params.action === 'speak'
+          ? 'audio=EMPTY | keys=[]'
+          : undefined,
     });
     return {
       spokenText: params.textToSpeak,
-      modelUsed: QUAT_NATIVE_AUDIO_DIALOG_MODEL,
+      modelUsed: targetModel,
+      error: errMsg,
+      attempts: serverAttempts,
     };
   }
 }
@@ -1147,11 +1733,12 @@ export async function executeGlobalChatCompletion(
     temperature?: number;
     isBoostActive?: boolean;
     flowName?: 'strive-chat' | 'learning-diagnosis';
+    attachments?: AIAttachmentPayload[];
     onStatusChange?: (status: string) => void;
   } = {}
 ): Promise<{ text: string; modelUsed: string }> {
   const { geminiApiKey, groqApiKey } = getAIKeys();
-  const { jsonMode = false, flowName = 'strive-chat', onStatusChange } = options;
+  const { jsonMode = false, flowName = 'strive-chat', attachments, onStatusChange } = options;
 
   if (!geminiApiKey || !groqApiKey) {
     throw new Error('Configure as duas chaves (Gemini e Groq) para utilizar a Inteligência Artificial.');
@@ -1183,7 +1770,8 @@ export async function executeGlobalChatCompletion(
             geminiApiKey,
             jsonMode,
             'HIGH',
-            AI_HIGH_THINKING_TIMEOUT_MS
+            AI_HIGH_THINKING_TIMEOUT_MS,
+            attachments
           ),
         HIGH_GEMINI_MODEL_4_HYDROGEN,
         onStatusChange,
@@ -1267,7 +1855,8 @@ export async function executeGlobalChatCompletion(
               geminiApiKey,
               jsonMode,
               'HIGH',
-              AI_HIGH_THINKING_TIMEOUT_MS
+              AI_HIGH_THINKING_TIMEOUT_MS,
+              attachments
             ),
           HIGH_GEMINI_MODEL_38,
           onStatusChange,
@@ -1352,7 +1941,8 @@ export async function executeGlobalChatCompletion(
               geminiApiKey,
               jsonMode,
               'HIGH',
-              AI_HIGH_THINKING_TIMEOUT_MS
+              AI_HIGH_THINKING_TIMEOUT_MS,
+              attachments
             ),
           HIGH_GEMINI_MODEL_36,
           onStatusChange,
@@ -1439,7 +2029,8 @@ export async function executeGlobalChatCompletion(
           geminiApiKey,
           jsonMode,
           undefined,
-          standardFlowTimeoutMs
+          standardFlowTimeoutMs,
+          attachments
         ),
       DEFAULT_GEMINI_MODEL,
       onStatusChange,
@@ -1515,7 +2106,8 @@ export async function executeGlobalChatCompletion(
               geminiApiKey,
               jsonMode,
               undefined,
-              standardFlowTimeoutMs
+              standardFlowTimeoutMs,
+              attachments
             ),
           EXTREME_FALLBACK_GEMINI_MODEL,
           onStatusChange,
@@ -1572,6 +2164,36 @@ function extractSafeJson(raw: string): Record<string, any> | null {
     }
     return null;
   }
+}
+
+/**
+ * Formata em 1 linha compacta o microdado TRI e a habilidade INEP (ou motivo de abandono) da questão atual.
+ */
+function formatQuestionTRILine(question?: Question | null): string {
+  if (!question?.metadata) return '';
+  const { tri, habilidade_inep, in_item_aban, tx_motivo_aban } = question.metadata;
+  const hasTri = Boolean(tri && (tri.difficulty_label || tri.level_1_to_10 != null));
+  const hasHab = Boolean(habilidade_inep && String(habilidade_inep).trim());
+  const hasAban = Boolean(in_item_aban && tx_motivo_aban && String(tx_motivo_aban).trim());
+
+  if (!hasTri && !hasHab && !hasAban) return '';
+
+  const triSegment = hasTri
+    ? `TRI: ${tri!.difficulty_label || 'Calibrado'} (${tri!.level_1_to_10 ?? '?'}/10)`
+    : hasAban
+    ? `TRI: Item abandonado (${String(tx_motivo_aban).trim()})`
+    : 'TRI: N/A';
+
+  const habOrAbanSegment =
+    hasAban && hasTri
+      ? `Habilidade: ${hasHab ? String(habilidade_inep).trim() : String(tx_motivo_aban).trim()} (${String(tx_motivo_aban).trim()})`
+      : hasHab
+      ? `Habilidade: ${String(habilidade_inep).trim()}`
+      : hasAban
+      ? `Habilidade: ${String(tx_motivo_aban).trim()}`
+      : '';
+
+  return habOrAbanSegment ? `${triSegment} | ${habOrAbanSegment}` : triSegment;
 }
 
 /**
@@ -1648,9 +2270,12 @@ Responda EXCLUSIVAMENTE em formato JSON válido seguindo exatamente esta estrutu
   "spoken_response": "Texto direto e fluido que será falado em voz alta ao estudante."
 }`;
 
+  const triLine = formatQuestionTRILine(question);
+
   const contextBlock = [
     `Disciplina: ${question.metadata.subject}`,
     `Tópicos: ${(question.metadata.topics || []).join(', ') || 'Geral'}`,
+    triLine,
     question.associated_context?.has_associated_context && question.associated_context?.content
       ? `Texto de Apoio: ${question.associated_context.content.slice(0, 700)}`
       : '',
@@ -1703,11 +2328,12 @@ Responda EXCLUSIVAMENTE em formato JSON válido seguindo exatamente esta estrutu
       ? parsed.spoken_response.trim()
       : text.replace(/```json|```/g, '').trim();
 
-  // 2. Devolve a resposta da Groq para o Gemini 2.0 Flash Native Audio Dialog preparar o fluxo de fala
-  onStatusChange?.(`Transmitindo áudio via ${QUAT_NATIVE_AUDIO_DIALOG_MODEL}...`);
-  await notifyQuatNativeAudioDialog({
+  // 2. Devolve a resposta da Groq para o Gemini TTS preparar o áudio neural
+  onStatusChange?.('Sintetizando áudio neural no Gemini...');
+  const cleanSpeechText = sanitizeTextForSpeech(spokenResponseText) || spokenResponseText;
+  const audioResult = await notifyQuatNativeAudioDialog({
     action: 'speak',
-    textToSpeak: spokenResponseText,
+    textToSpeak: cleanSpeechText,
   });
 
   if (parsed && typeof parsed.spoken_response === 'string') {
@@ -1727,7 +2353,10 @@ Responda EXCLUSIVAMENTE em formato JSON válido seguindo exatamente esta estrutu
         : question.metadata.topics?.slice(0, 2) || [question.metadata.subject],
       spoken_response: spokenResponseText,
       model_used: modelUsed,
-      audio_dialog_model: QUAT_NATIVE_AUDIO_DIALOG_MODEL,
+      audio_dialog_model: audioResult.upstreamModelUsed || audioResult.modelUsed || QUAT_NATIVE_AUDIO_DIALOG_MODEL,
+      audioBase64: audioResult.audioBase64,
+      mimeType: audioResult.mimeType,
+      audioError: audioResult.error,
     };
   }
 
@@ -1737,7 +2366,10 @@ Responda EXCLUSIVAMENTE em formato JSON válido seguindo exatamente esta estrutu
     blocking_tags: question.metadata.topics?.slice(0, 2) || [question.metadata.subject],
     spoken_response: spokenResponseText,
     model_used: modelUsed,
-    audio_dialog_model: QUAT_NATIVE_AUDIO_DIALOG_MODEL,
+    audio_dialog_model: audioResult.upstreamModelUsed || audioResult.modelUsed || QUAT_NATIVE_AUDIO_DIALOG_MODEL,
+    audioBase64: audioResult.audioBase64,
+    mimeType: audioResult.mimeType,
+    audioError: audioResult.error,
   };
 }
 
@@ -1965,6 +2597,7 @@ Retorne EXCLUSIVAMENTE um JSON válido com esta estrutura exata:
 export async function runGlobalAssistantChat(params: {
   chatHistory: Array<{ role: 'user' | 'assistant'; content: string; timestamp?: number }>;
   userMessage: string;
+  attachments?: AIAttachmentPayload[];
   recentActivitySummary: string;
   statsSummary: string;
   currentQuestion?: Question | null;
@@ -1975,6 +2608,7 @@ export async function runGlobalAssistantChat(params: {
   const {
     chatHistory,
     userMessage,
+    attachments,
     recentActivitySummary,
     statsSummary,
     currentQuestion,
@@ -2020,12 +2654,14 @@ export async function runGlobalAssistantChat(params: {
             return `${o.letter}) ${o.text}${suffix}`;
           })
           .join('\n');
+        const triLine = formatQuestionTRILine(currentQuestion);
+        const triLineFormatted = triLine ? `${triLine}\n` : '';
         const ctxSupport =
           currentQuestion.associated_context?.has_associated_context &&
           currentQuestion.associated_context?.content
             ? `Texto de Apoio: ${currentQuestion.associated_context.content.slice(0, 600)}\n`
             : '';
-        return `\nQUESTÃO ATUAL ABERTA NA TELA (#${currentQuestion.sequence_id} - ${currentQuestion.metadata.subject} • ${(currentQuestion.metadata.topics || []).join(', ') || 'Geral'}):\n${ctxSupport}Enunciado: ${currentQuestion.stem.full_text}\nAlternativas e Comentários de Bastidor:\n${optsWithBackstage}\nGabarito de referência interno: Alternativa ${currentQuestion.resolution.deduced_answer}.`;
+        return `\nQUESTÃO ATUAL ABERTA NA TELA (#${currentQuestion.sequence_id} - ${currentQuestion.metadata.subject} • ${(currentQuestion.metadata.topics || []).join(', ') || 'Geral'}):\n${triLineFormatted}${ctxSupport}Enunciado: ${currentQuestion.stem.full_text}\nAlternativas e Comentários de Bastidor:\n${optsWithBackstage}\nGabarito de referência interno: Alternativa ${currentQuestion.resolution.deduced_answer}.`;
       })()
     : '';
 
@@ -2084,6 +2720,14 @@ DIRETRIZES OBRIGATÓRIAS DO STRIVE:
 \`\`\`glossario
 [{"term": "termo exato usado no texto", "definition": "explicação curta e clara em até 1 frase"}]
 \`\`\`
+8. FÓRMULAS MATEMÁTICAS, FÍSICAS E QUÍMICAS EM LATEX (\`$...$\` e \`$$...$$\`):
+   - Sempre que escrever fórmulas matemáticas, físicas ou químicas (frações, potências, raízes, índices, logaritmos, funções ou equações), utilize LaTeX inline com \`$...$\` (ex: \`$E_c = \\frac{mv^2}{2}$\`, \`$\\Delta H < 0$\`, \`$f(x) = ax^2 + bx + c$\`) ou em bloco destacado centralizado com \`$$...$$\` para equações principais.
+9. GRÁFICOS, CIRCUITOS E FIGURAS GEOMÉTRICAS SOB DEMANDA (\`[[GRAFICO: ...]]\`):
+   - Quando um gráfico cartesiano, parábola, reta, função, circuito elétrico, figura geométrica ou diagrama visual ajudar o estudante a compreender o raciocínio, insira no ponto adequado da resposta o marcador estruturado com um **título curto de no máximo 50 caracteres**:
+     \`[[GRAFICO: "Título curto (< 50 chars)" | "Descrição detalhada dos eixos, variáveis, curvas, pontos notáveis, valores e rótulos que devem aparecer na figura"]]\`
+   - O sistema converterá esse marcador automaticamente em um botão interativo com o gráfico vetorial validado. NUNCA escreva tags \`<svg>\` cruas na mensagem; use exclusivamente o marcador \`[[GRAFICO: "Título curto" | "Descrição detalhada"]]\`.
+10. CUIDADO HUMANO COM HORÁRIO DE MADRUGADA (\`00:30\` ÀS \`05:00\`):
+   - Usando o horário em \`[Horário da mensagem: ...]\` da mensagem atual, se o horário atual estiver entre **\`00:30\` e \`05:00\`** da madrugada e você **ainda não tiver comentado sobre o horário nesta conversa**, dê **apenas uma única vez** um conselho breve e acolhedor recomendando descansar após tirar aquela dúvida, sem insistir nem repetir nas mensagens seguintes.
 
 CONTEXTO INTERNO DE REFERÊNCIA (NÃO RECITE COMO RELATÓRIO TÉCNICO):
 Resumo geral: ${statsSummary}
@@ -2184,6 +2828,7 @@ Atividade recente: ${activityBlock || 'Sem registros recentes.'}${questionBlock}
     temperature: 0.45,
     isBoostActive,
     flowName: 'strive-chat',
+    attachments,
     onStatusChange,
   });
 
@@ -2362,14 +3007,35 @@ REGRAS OBRIGATÓRIAS:
   const modelsToTry = ['qwen/qwen3.8-27b', 'llama-3.3-70b-versatile'];
 
   for (const model of modelsToTry) {
+    const t0 = Date.now();
     try {
-      const { text } = await callGroqModel(model, messages, groqApiKey, true, 0.45);
+      const { text, status } = await callGroqModel(model, messages, groqApiKey, true, 0.45);
       const parsed = extractSafeJson(text);
       const rawList = Array.isArray(parsed?.suggestions) ? parsed.suggestions : [];
       const cleanedList = rawList
         .map((item) => sanitizeSuggestionItem(item))
         .filter((item) => item.length > 0)
         .slice(0, 3);
+
+      recordRequestLog({
+        id: `req_${Date.now()}_sugg`,
+        timestamp: Date.now(),
+        isoTime: new Date().toISOString(),
+        flow: 'strive-suggestions',
+        requestedModel: model,
+        resolvedModel: model,
+        durationMs: Date.now() - t0,
+        httpStatus: status,
+        outcome: cleanedList.length === 3 ? 'success' : 'fallback',
+        statusTransitions: [],
+        requestSummary: {
+          messageCount: messages.length,
+          systemPromptLength: messages[0].content.length,
+          userPreview: 'Sugestões dinâmicas Strive',
+          jsonMode: true,
+        },
+        responsePreview: cleanedList.join(' | '),
+      });
 
       if (cleanedList.length === 3) {
         const payload: CachedStriveSuggestionsPayload = {
@@ -2384,10 +3050,656 @@ REGRAS OBRIGATÓRIAS:
         }
         return cleanedList;
       }
-    } catch {
-      // Tenta o próximo modelo de fallback silenciosamente
+    } catch (err: any) {
+      recordRequestLog({
+        id: `req_${Date.now()}_sugg_err`,
+        timestamp: Date.now(),
+        isoTime: new Date().toISOString(),
+        flow: 'strive-suggestions',
+        requestedModel: model,
+        resolvedModel: model,
+        durationMs: Date.now() - t0,
+        httpStatus: typeof err?.status === 'number' ? err.status : 500,
+        outcome: 'error',
+        statusTransitions: [],
+        errorMessage: err?.message || String(err),
+        requestSummary: {
+          messageCount: messages.length,
+          systemPromptLength: messages[0].content.length,
+          userPreview: 'Sugestões dinâmicas Strive',
+          jsonMode: true,
+        },
+      });
     }
   }
 
   return cached?.suggestions?.length === 3 ? cached.suggestions : [...DEFAULT_STRIVE_SUGGESTIONS];
 }
+
+export interface StriveGraphMarker {
+  key: string;
+  rawMarker: string;
+  title: string;
+  description: string;
+}
+
+export interface StriveGeneratedGraph {
+  key: string;
+  title: string;
+  description: string;
+  svg: string;
+  status: 'loading' | 'ready' | 'error';
+}
+
+export function normalizeGraphShortTitle(rawTitle: string): string {
+  const clean = (rawTitle || '')
+    .replace(/^["'“”«»\s]+|["'“”«»\s]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!clean) return 'Gráfico ilustrativo';
+  return clean.length > 50 ? `${clean.slice(0, 47).trim()}...` : clean;
+}
+
+export function computeGraphMarkerKey(title: string, description: string): string {
+  const normTitle = normalizeGraphShortTitle(title).toLowerCase();
+  const normDesc = (description || '')
+    .replace(/^["'“”«»\s]+|["'“”«»\s]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 90)
+    .toLowerCase();
+  return `${normTitle}__${normDesc}`;
+}
+
+export function extractGraphMarkersFromText(text: string): StriveGraphMarker[] {
+  if (!text || !/gr[aá]fico/i.test(text)) return [];
+  const regex = /\[\[\s*GR[AÁ]FICO\s*:\s*"?([^"|\]\n]+?)"?\s*\|\s*"?([\s\S]*?)"?\s*\]\]/gi;
+  const markers: StriveGraphMarker[] = [];
+  const seenKeys = new Set<string>();
+  let match: RegExpExecArray | null;
+
+  while ((match = regex.exec(text)) !== null) {
+    const title = normalizeGraphShortTitle(match[1] || '');
+    const description = (match[2] || '')
+      .replace(/^["'“”«»\s]+|["'“”«»\s]+$/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!description) continue;
+    const key = computeGraphMarkerKey(title, description);
+    if (!seenKeys.has(key)) {
+      seenKeys.add(key);
+      markers.push({
+        key,
+        rawMarker: match[0],
+        title,
+        description,
+      });
+    }
+  }
+
+  return markers;
+}
+
+function convertLatexFragmentToSpokenPtBr(latex: string): string {
+  return (latex || '')
+    .replace(/\\frac\s*\{([^{}]+)\}\s*\{([^{}]+)\}/g, '$1 sobre $2')
+    .replace(/\\sqrt\s*\{([^{}]+)\}/g, 'raiz quadrada de $1')
+    .replace(/\\Delta\b/g, ' delta ')
+    .replace(/\\alpha\b/g, ' alfa ')
+    .replace(/\\beta\b/g, ' beta ')
+    .replace(/\\gamma\b/g, ' gama ')
+    .replace(/\\theta\b/g, ' teta ')
+    .replace(/\\lambda\b/g, ' lambda ')
+    .replace(/\\mu\b/g, ' mi ')
+    .replace(/\\omega\b/g, ' ômega ')
+    .replace(/\\pi\b/g, ' pi ')
+    .replace(/\\times\b|\\cdot\b/g, ' vezes ')
+    .replace(/\\div\b/g, ' dividido por ')
+    .replace(/\\pm\b/g, ' mais ou menos ')
+    .replace(/\\leq\b|\\le\b/g, ' menor ou igual a ')
+    .replace(/\\geq\b|\\ge\b/g, ' maior ou igual a ')
+    .replace(/\\neq\b|\\ne\b/g, ' diferente de ')
+    .replace(/\\approx\b/g, ' aproximadamente ')
+    .replace(/\\rightarrow\b|\\to\b/g, ' tende a ')
+    .replace(/\^\s*\{?\s*2\s*\}?(?![0-9])/g, ' ao quadrado ')
+    .replace(/\^\s*\{?\s*3\s*\}?(?![0-9])/g, ' ao cubo ')
+    .replace(/\^\s*\{([^{}]+)\}/g, ' elevado a $1 ')
+    .replace(/_\s*\{([^{}]+)\}/g, ' $1 ')
+    .replace(/\\[a-zA-Z]+/g, ' ')
+    .replace(/[{}_^$]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export function sanitizeTextForSpeech(raw: string): string {
+  if (!raw) return '';
+  let text = String(raw);
+
+  // 1. Remove blocos ```glossario / ```glossary (fechados ou abertos)
+  text = text.replace(/```(?:glossario|glossary)\b[\s\S]*?```/gi, ' ');
+  text = text.replace(/```(?:glossario|glossary)\b[\s\S]*$/gi, ' ');
+
+  // 2. Remove outros blocos de código cercados ```...``` mantendo apenas o conteúdo limpo
+  text = text.replace(/```[a-zA-Z0-9_-]*\s*([\s\S]*?)```/g, ' $1 ');
+
+  // 3. Remove marcadores [[GRAFICO:...]]
+  text = text.replace(
+    /\[\[\s*GR[AÁ]FICO\s*:[\s\S]*?\]\]/gi,
+    ' '
+  );
+  text = text.replace(/\[\[\s*GR[AÁ]FICO\s*:[\s\S]*$/gi, ' ');
+
+  // 4. Converte/limpa blocos $$...$$ e inline $...$ para leitura natural
+  text = text.replace(/\$\$([\s\S]+?)\$\$/g, (_m, inner: string) => {
+    return ` ${convertLatexFragmentToSpokenPtBr(inner)} `;
+  });
+  text = text.replace(/\$([^$\n]+?)\$/g, (_m, inner: string) => {
+    return ` ${convertLatexFragmentToSpokenPtBr(inner)} `;
+  });
+
+  // 5. Links markdown [texto](url) -> texto
+  text = text.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+
+  // 6. Remove títulos (#), negrito (** / __), itálico (* / _), crases (`) e marcadores de lista
+  text = text
+    .replace(/^\s*#{1,6}\s+/gm, '')
+    .replace(/^\s*>\s?/gm, '')
+    .replace(/^\s*[-*•]\s+/gm, '')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/__([^_]+)__/g, '$1')
+    .replace(/\*([^*\n]+)\*/g, '$1')
+    .replace(/(^|\s)_([^_\n]+)_(?=\s|[.,!?;:]|$)/g, '$1$2')
+    .replace(/[`*~#]/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+
+  return text;
+}
+
+export const stripGraphMarkersForSpeech = sanitizeTextForSpeech;
+
+function escapeXmlText(input: string): string {
+  return (input || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+function buildFallbackGraphSvg(title: string, description: string): string {
+  const safeTitle = escapeXmlText(normalizeGraphShortTitle(title));
+  const safeDesc = escapeXmlText((description || '').slice(0, 88));
+  return `<svg viewBox="0 0 600 360" xmlns="http://www.w3.org/2000/svg" class="w-full h-auto max-h-[65vh]" fill="none">
+  <g stroke="currentColor" stroke-opacity="0.14" stroke-width="1" stroke-dasharray="4 4">
+    <line x1="70" y1="70" x2="540" y2="70" />
+    <line x1="70" y1="135" x2="540" y2="135" />
+    <line x1="70" y1="200" x2="540" y2="200" />
+    <line x1="70" y1="265" x2="540" y2="265" />
+    <line x1="185" y1="50" x2="185" y2="295" />
+    <line x1="305" y1="50" x2="305" y2="295" />
+    <line x1="425" y1="50" x2="425" y2="295" />
+  </g>
+  <g stroke="currentColor" stroke-width="2" stroke-linecap="round">
+    <line x1="70" y1="295" x2="550" y2="295" />
+    <line x1="70" y1="295" x2="70" y2="45" />
+    <polyline points="542,290 552,295 542,300" fill="none" />
+    <polyline points="65,53 70,43 75,53" fill="none" />
+  </g>
+  <path d="M 85 270 Q 230 85 355 165 T 525 75" stroke="var(--theme-accent)" stroke-width="3" fill="none" stroke-linecap="round" />
+  <circle cx="235" cy="142" r="5" fill="var(--theme-accent)" />
+  <circle cx="355" cy="165" r="5" fill="var(--theme-accent)" />
+  <text x="300" y="28" text-anchor="middle" fill="currentColor" font-family="sans-serif" font-size="14" font-weight="700">${safeTitle}</text>
+  <text x="300" y="334" text-anchor="middle" fill="currentColor" fill-opacity="0.75" font-family="sans-serif" font-size="11">${safeDesc}</text>
+</svg>`;
+}
+
+export function sanitizeGeneratedSvg(rawOutput: string): string | null {
+  if (!rawOutput || typeof rawOutput !== 'string') return null;
+
+  const svgMatch = rawOutput.match(/<svg[\s\S]*?<\/svg>/i);
+  if (!svgMatch) return null;
+
+  let svg = svgMatch[0].trim();
+
+  // Remove elementos potencialmente inseguros ou incompatíveis
+  svg = svg
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<foreignObject[\s\S]*?<\/foreignObject>/gi, '')
+    .replace(/<iframe[\s\S]*?<\/iframe>/gi, '')
+    .replace(/\son[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    .replace(/javascript\s*:/gi, '');
+
+  // Remove retângulos de fundo opaco que cobrem todo o canvas (ex: width="100%" ou width="600")
+  svg = svg.replace(
+    /<rect\b[^>]*(?:width\s*=\s*["'](?:100%|600(?:px)?)["'])[^>]*(?:height\s*=\s*["'](?:100%|360(?:px)?)["'])[^>]*\/?>/gi,
+    ''
+  );
+
+  // Converte cores literais hexadecimais ou white/black para tokens de tema/currentColor
+  const hexRegex = new RegExp('\\x23[0-9a-fA-F]{3,8}\\b', 'g');
+  svg = svg
+    .replace(hexRegex, 'currentColor')
+    .replace(/\b(?:rgb|hsl)a?\([^)]*\)/gi, 'currentColor')
+    .replace(/(fill|stroke)\s*=\s*["'](?:black|white)["']/gi, '$1="currentColor"');
+
+  // Garante viewBox="0 0 600 360" e xmlns na tag <svg>
+  svg = svg.replace(/<svg\b([^>]*)>/i, (_full, attrs: string) => {
+    let updatedAttrs = attrs;
+    if (!/\bviewBox\s*=/i.test(updatedAttrs)) {
+      updatedAttrs += ' viewBox="0 0 600 360"';
+    }
+    if (!/\bxmlns\s*=/i.test(updatedAttrs)) {
+      updatedAttrs += ' xmlns="http://www.w3.org/2000/svg"';
+    }
+    if (!/\bclass\s*=/i.test(updatedAttrs)) {
+      updatedAttrs += ' class="w-full h-auto max-h-[65vh]"';
+    }
+    return `<svg${updatedAttrs}>`;
+  });
+
+  return svg;
+}
+
+/**
+ * Pipeline em 2 estágios em segundo plano para geração de gráficos SVG do Strive:
+ * 1. Groq (`qwen/qwen3.8-27b`, fallback `llama-3.3-70b-versatile`) gera `<svg viewBox="0 0 600 360">`
+ *    100% adaptado a `currentColor` e `var(--theme-accent)` (sem fundo branco fixo).
+ * 2. Validação silenciosa rápida no `gemini-3.5-flash-lite` (sem consumir cota do Boost e sem exibir
+ *    status de modelo na interface) para aprovar ou corrigir textos/eixos sobrepostos antes de exibir.
+ */
+export async function generateAndValidateStriveGraphSVG(params: {
+  title: string;
+  description: string;
+  contextSummary?: string;
+}): Promise<string> {
+  const shortTitle = normalizeGraphShortTitle(params.title);
+  const description = (params.description || '').trim();
+  const contextSummary = (params.contextSummary || '').trim().slice(0, 600);
+
+  const { geminiApiKey, groqApiKey } = getAIKeys();
+  const cleanGroqKey = (groqApiKey || '').trim();
+  const cleanGeminiKey = (geminiApiKey || '').trim();
+
+  if (!cleanGroqKey && !cleanGeminiKey) {
+    return buildFallbackGraphSvg(shortTitle, description);
+  }
+
+  const groqSystemPrompt = `Você é um gerador especialista de gráficos e diagramas pedagógicos em SVG para estudantes do ENEM.
+REGRAS OBRIGATÓRIAS DO SVG:
+1. Retorne EXCLUSIVAMENTE o código <svg viewBox="0 0 600 360" xmlns="http://www.w3.org/2000/svg">...</svg>, sem markdown, sem blocos \`\`\` e sem texto antes ou depois.
+2. NUNCA coloque <rect> de fundo branco ou escuro. O fundo deve ser 100% transparente.
+3. Use APENAS \`currentColor\` para eixos, linhas de grade (com \`stroke-opacity="0.16"\`), marcações e textos/rótulos (\`fill="currentColor"\`), e use \`var(--theme-accent)\` para a curva principal, vetores em destaque ou pontos notáveis. NUNCA use códigos hexadecimais ou rgb().
+4. Deixe margem interna segura (x entre 65 e 545, y entre 45 e 310) para que nenhum rótulo ou título seja cortado nas bordas.
+5. Evite qualquer sobreposição de texto: afaste rótulos de pontos e eixos por pelo menos 14px das linhas e curvas. Use font-family="sans-serif" e font-size entre 11 e 14.`;
+
+  const groqUserPrompt = [
+    `Título curto: ${shortTitle}`,
+    `Especificação detalhada do gráfico/diagrama: ${description}`,
+    contextSummary ? `Contexto resumido da explicação: ${contextSummary}` : '',
+    `Gere agora apenas o <svg viewBox="0 0 600 360" xmlns="http://www.w3.org/2000/svg">...</svg> completo e matematicamente fiel.`,
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  let candidateSvg: string | null = null;
+
+  if (cleanGroqKey) {
+    const groqModels = ['qwen/qwen3.8-27b', 'llama-3.3-70b-versatile', GROQ_PRIMARY_MODEL];
+    for (const model of groqModels) {
+      const t0 = Date.now();
+      try {
+        const { text, status } = await callGroqModel(
+          model,
+          [
+            { role: 'system', content: groqSystemPrompt },
+            { role: 'user', content: groqUserPrompt },
+          ],
+          cleanGroqKey,
+          false,
+          0.25
+        );
+        const sanitized = sanitizeGeneratedSvg(text);
+        recordRequestLog({
+          id: `req_${Date.now()}_svg_groq`,
+          timestamp: Date.now(),
+          isoTime: new Date().toISOString(),
+          flow: 'svg-graph:generate',
+          requestedModel: model,
+          resolvedModel: model,
+          durationMs: Date.now() - t0,
+          httpStatus: status,
+          outcome: sanitized ? 'success' : 'fallback',
+          statusTransitions: [],
+          requestSummary: {
+            messageCount: 2,
+            systemPromptLength: groqSystemPrompt.length,
+            userPreview: shortTitle,
+            jsonMode: false,
+          },
+          responsePreview: sanitized ? `SVG gerado (${sanitized.length} chars)` : 'SVG inválido',
+        });
+        if (sanitized) {
+          candidateSvg = sanitized;
+          break;
+        }
+      } catch (err: any) {
+        recordRequestLog({
+          id: `req_${Date.now()}_svg_groq_err`,
+          timestamp: Date.now(),
+          isoTime: new Date().toISOString(),
+          flow: 'svg-graph:generate',
+          requestedModel: model,
+          resolvedModel: model,
+          durationMs: Date.now() - t0,
+          httpStatus: typeof err?.status === 'number' ? err.status : 500,
+          outcome: 'error',
+          statusTransitions: [],
+          errorMessage: err?.message || String(err),
+          requestSummary: {
+            messageCount: 2,
+            systemPromptLength: groqSystemPrompt.length,
+            userPreview: shortTitle,
+            jsonMode: false,
+          },
+        });
+      }
+    }
+  }
+
+  // Etapa 2: Validação silenciosa rápida no gemini-3.5-flash-lite (sem consumir cota do Boost e sem mostrar status na UI)
+  if (cleanGeminiKey) {
+    const t0 = Date.now();
+    try {
+      const validationSystemPrompt = `Você é um revisor visual silencioso de gráficos pedagógicos SVG (viewBox="0 0 600 360").
+Sua tarefa:
+- Verificar o SVG recebido contra o título e a descrição pedagógica solicitada.
+- Se houver qualquer texto sobreposto, rótulo cortado fora do viewBox (0 0 600 360), eixo desalinhado, curva incorreta ou falta de legibilidade, corrija as coordenadas (x, y, text-anchor, path) para que fique limpo, nítido e sem sobreposições.
+- Mantenha 100% das cores em \`currentColor\` (eixos, grades, textos) e \`var(--theme-accent)\` (curva principal e destaques), sem fundo branco fixo e sem códigos hexadecimais.
+- Retorne EXCLUSIVAMENTE o elemento <svg viewBox="0 0 600 360" xmlns="http://www.w3.org/2000/svg">...</svg> final validado, sem nenhum texto adicional.`;
+
+      const validationUserPrompt = candidateSvg
+        ? `Título: ${shortTitle}\nDescrição esperada: ${description}\n\nSVG gerado para revisão:\n${candidateSvg}\n\nRetorne apenas o <svg viewBox="0 0 600 360" ...>...</svg> validado (ou corrigido se houver textos/eixos sobrepostos).`
+        : `${groqUserPrompt}`;
+
+      const geminiRes = await callGeminiModel(
+        DEFAULT_GEMINI_MODEL,
+        [
+          { role: 'system', content: validationSystemPrompt },
+          { role: 'user', content: validationUserPrompt },
+        ],
+        cleanGeminiKey,
+        false,
+        undefined,
+        25000
+      );
+
+      const validatedSvg = sanitizeGeneratedSvg(geminiRes.text);
+      recordRequestLog({
+        id: `req_${Date.now()}_svg_val`,
+        timestamp: Date.now(),
+        isoTime: new Date().toISOString(),
+        flow: 'svg-graph:validate',
+        requestedModel: DEFAULT_GEMINI_MODEL,
+        resolvedModel: geminiRes.modelUsed,
+        upstreamModelUsed: geminiRes.upstreamModelUsed,
+        durationMs: Date.now() - t0,
+        httpStatus: geminiRes.status,
+        outcome: validatedSvg ? 'success' : 'fallback',
+        statusTransitions: [],
+        serverAttempts: geminiRes.serverAttempts,
+        requestSummary: {
+          messageCount: 2,
+          systemPromptLength: validationSystemPrompt.length,
+          userPreview: shortTitle,
+          jsonMode: false,
+        },
+        responsePreview: validatedSvg ? `SVG validado (${validatedSvg.length} chars)` : 'SVG sem alteração',
+      });
+      if (validatedSvg) {
+        return validatedSvg;
+      }
+    } catch (err: any) {
+      recordRequestLog({
+        id: `req_${Date.now()}_svg_val_err`,
+        timestamp: Date.now(),
+        isoTime: new Date().toISOString(),
+        flow: 'svg-graph:validate',
+        requestedModel: DEFAULT_GEMINI_MODEL,
+        resolvedModel: DEFAULT_GEMINI_MODEL,
+        durationMs: Date.now() - t0,
+        httpStatus: typeof err?.status === 'number' ? err.status : 500,
+        outcome: 'error',
+        statusTransitions: [],
+        serverAttempts: err?.serverAttempts,
+        errorMessage: err?.message || String(err),
+        requestSummary: {
+          messageCount: 2,
+          systemPromptLength: 0,
+          userPreview: shortTitle,
+          jsonMode: false,
+        },
+      });
+    }
+  }
+
+  return candidateSvg || buildFallbackGraphSvg(shortTitle, description);
+}
+
+export interface GeneratedMicroTip {
+  text: string;
+  tags: string[];
+}
+
+const LOADING_TIPS_FALLBACK_GEMINI_MODEL = 'gemma-4-31b-it';
+
+/**
+ * Gera em segundo plano um lote de micro-dicas autossuficientes para a tela de carregamento.
+ * Usa exclusivamente `openai/gpt-oss-120b` via `/api/groq/chat`, com fallback para
+ * `gemma-4-31b-it` na API Gemini se a chave Groq não estiver configurada (sem tocar nos modelos Gemini de 20 RPD).
+ */
+export async function generateMicroTipsBatch(params: {
+  focusTags: string[];
+  existingTips?: string[];
+  count?: number;
+}): Promise<GeneratedMicroTip[]> {
+  const { groqApiKey, geminiApiKey } = getAIKeys();
+  const cleanGroqKey = (groqApiKey || '').trim();
+  const cleanGeminiKey = (geminiApiKey || '').trim();
+
+  if (!cleanGroqKey && !cleanGeminiKey) {
+    return [];
+  }
+
+  const targetCount = Math.max(1, Math.min(12, params.count ?? 8));
+  const cleanTags = (params.focusTags || [])
+    .map((t) => String(t || '').trim())
+    .filter(Boolean)
+    .slice(0, 10);
+
+  const existingSamples = (params.existingTips || [])
+    .map((t) => String(t || '').trim())
+    .filter(Boolean)
+    .slice(0, 12);
+
+  const systemPrompt = `Você escreve micro-dicas pedagógicas para aparecerem na tela de abertura de um aplicativo de estudos para o ENEM.
+
+REGRAS OBRIGATÓRIAS:
+1. Retorne EXCLUSIVAMENTE um JSON válido no formato:
+   {"tips": [{"text": "...", "tags": ["tag1", "tag2"]}]}
+   contendo exatamente ${targetCount} itens.
+2. Cada dica deve ter entre 20 e 35 palavras, escrita em português natural, claro e direto.
+3. Cada dica deve ser 100% AUTOSSUFICIENTE e ensinar o "PORQUÊ" ou o contraste-chave do conceito, para qualquer pessoa entender mesmo sem ter estudado o assunto antes.
+4. Inspire-se no nível de clareza destes exemplos (NÃO os copie):
+   - "Carros amassam a frente na batida para aumentar o tempo de parada: quanto mais tempo dura o impacto, menor a força que chega ao passageiro."
+   - "Quando a escala de uma maquete dobra, comprimentos dobram (×2), áreas quadruplicam (×2²) e volumes multiplicam por oito (×2³)."
+5. PROIBIDO: clichês motivacionais ("leia com atenção", "revise o conteúdo", "acredite em você"), fórmulas soltas sem explicação do significado, referências a números de questões, alternativas ou enunciados específicos.`;
+
+  const userPromptLines = [
+    `Gere ${targetCount} micro-dicas inéditas alinhadas prioritariamente a estes assuntos/tags: ${cleanTags.join(', ') || 'Matemática, Física, Química, Biologia, Linguagens'}.`,
+  ];
+  if (existingSamples.length > 0) {
+    userPromptLines.push(
+      `Evite repetir ou parafrasear estas dicas já existentes:\n- ${existingSamples.join('\n- ')}`
+    );
+  }
+
+  const messages: AIMessage[] = [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: userPromptLines.join('\n\n') },
+  ];
+
+  const parseTipsFromRaw = (rawText: string): GeneratedMicroTip[] => {
+    const parsed = extractSafeJson(rawText);
+    const list = Array.isArray(parsed?.tips) ? parsed.tips : [];
+    const results: GeneratedMicroTip[] = [];
+    for (const item of list) {
+      const text = typeof item?.text === 'string' ? item.text.replace(/\s+/g, ' ').trim() : '';
+      if (!text) continue;
+      const tags = Array.isArray(item?.tags)
+        ? item.tags.map((t: unknown) => String(t || '').trim()).filter(Boolean).slice(0, 5)
+        : [];
+      results.push({
+        text,
+        tags: tags.length > 0 ? tags : cleanTags.slice(0, 3),
+      });
+    }
+    return results;
+  };
+
+  if (cleanGroqKey) {
+    const t0 = Date.now();
+    try {
+      const response = await fetchWithTimeout(
+        '/api/groq/chat',
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-groq-api-key': cleanGroqKey,
+          },
+          body: JSON.stringify({
+            model: GROQ_PRIMARY_MODEL,
+            messages,
+            jsonMode: true,
+            temperature: 0.55,
+            apiKey: cleanGroqKey,
+          }),
+        },
+        AI_REQUEST_TIMEOUT_MS
+      );
+
+      const data = await response.json().catch(() => null);
+      if (!response.ok || !data?.text) {
+        throw new Error(data?.error || `HTTP ${response.status} em /api/groq/chat`);
+      }
+
+      const parsedTips = parseTipsFromRaw(String(data.text));
+      recordRequestLog({
+        id: `req_${Date.now()}_tips_groq`,
+        timestamp: Date.now(),
+        isoTime: new Date().toISOString(),
+        flow: 'loading-tips',
+        requestedModel: GROQ_PRIMARY_MODEL,
+        resolvedModel: data?.modelUsed || GROQ_PRIMARY_MODEL,
+        durationMs: Date.now() - t0,
+        httpStatus: response.status,
+        outcome: parsedTips.length > 0 ? 'success' : 'fallback',
+        statusTransitions: [],
+        requestSummary: {
+          messageCount: messages.length,
+          systemPromptLength: systemPrompt.length,
+          userPreview: cleanTags.join(', '),
+          jsonMode: true,
+        },
+        responsePreview: `${parsedTips.length} dicas geradas`,
+      });
+
+      if (parsedTips.length > 0) {
+        return parsedTips;
+      }
+    } catch (err: any) {
+      recordRequestLog({
+        id: `req_${Date.now()}_tips_groq_err`,
+        timestamp: Date.now(),
+        isoTime: new Date().toISOString(),
+        flow: 'loading-tips',
+        requestedModel: GROQ_PRIMARY_MODEL,
+        resolvedModel: GROQ_PRIMARY_MODEL,
+        durationMs: Date.now() - t0,
+        httpStatus: typeof err?.status === 'number' ? err.status : 500,
+        outcome: 'error',
+        statusTransitions: [],
+        errorMessage: err?.message || String(err),
+        requestSummary: {
+          messageCount: messages.length,
+          systemPromptLength: systemPrompt.length,
+          userPreview: cleanTags.join(', '),
+          jsonMode: true,
+        },
+      });
+    }
+  }
+
+  if (cleanGeminiKey) {
+    const t0 = Date.now();
+    try {
+      const geminiRes = await callGeminiModel(
+        LOADING_TIPS_FALLBACK_GEMINI_MODEL,
+        messages,
+        cleanGeminiKey,
+        false,
+        undefined,
+        AI_REQUEST_TIMEOUT_MS
+      );
+      const parsedTips = parseTipsFromRaw(geminiRes.text);
+      recordRequestLog({
+        id: `req_${Date.now()}_tips_gemma`,
+        timestamp: Date.now(),
+        isoTime: new Date().toISOString(),
+        flow: 'loading-tips',
+        requestedModel: LOADING_TIPS_FALLBACK_GEMINI_MODEL,
+        resolvedModel: geminiRes.modelUsed,
+        upstreamModelUsed: geminiRes.upstreamModelUsed,
+        durationMs: Date.now() - t0,
+        httpStatus: geminiRes.status,
+        outcome: parsedTips.length > 0 ? 'success' : 'fallback',
+        statusTransitions: [],
+        serverAttempts: geminiRes.serverAttempts,
+        requestSummary: {
+          messageCount: messages.length,
+          systemPromptLength: systemPrompt.length,
+          userPreview: cleanTags.join(', '),
+          jsonMode: false,
+        },
+        responsePreview: `${parsedTips.length} dicas geradas`,
+      });
+      return parsedTips;
+    } catch (err: any) {
+      recordRequestLog({
+        id: `req_${Date.now()}_tips_gemma_err`,
+        timestamp: Date.now(),
+        isoTime: new Date().toISOString(),
+        flow: 'loading-tips',
+        requestedModel: LOADING_TIPS_FALLBACK_GEMINI_MODEL,
+        resolvedModel: LOADING_TIPS_FALLBACK_GEMINI_MODEL,
+        durationMs: Date.now() - t0,
+        httpStatus: typeof err?.status === 'number' ? err.status : 500,
+        outcome: 'error',
+        statusTransitions: [],
+        serverAttempts: err?.serverAttempts,
+        errorMessage: err?.message || String(err),
+        requestSummary: {
+          messageCount: messages.length,
+          systemPromptLength: systemPrompt.length,
+          userPreview: cleanTags.join(', '),
+          jsonMode: false,
+        },
+      });
+    }
+  }
+
+  return [];
+}
+
+

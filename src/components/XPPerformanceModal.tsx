@@ -57,7 +57,7 @@ export const XPPerformanceModal: React.FC<XPPerformanceModalProps> = ({
             </div>
             <div>
               <h2 id="xp-modal-title" className="text-base font-bold text-primary theme-text-primary leading-tight">
-                Painel de Desempenho & Metas
+                Painel de Desempenho e Metas
               </h2>
               <p className="text-xs text-muted">Acompanhe seu progresso e ritmo de estudos</p>
             </div>

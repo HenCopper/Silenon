@@ -44,7 +44,7 @@ export const AssociatedContextPanel: React.FC<AssociatedContextPanelProps> = ({ 
   const cleanUrl = context.source ? extractCleanUrl(context.source) : null;
 
   return (
-    <div className="w-full h-auto flex flex-col theme-card border border-border rounded-xl shadow-xs">
+    <div className="w-full h-auto flex flex-col theme-card border border-border rounded-xl overflow-hidden shadow-xs">
       {/* Header Bar with Reading Controls */}
       <div className="px-4 py-2.5 bg-surface-subtle border-b border-border flex items-center justify-between gap-2 shrink-0">
         <div className="flex items-center gap-2">
@@ -83,7 +83,7 @@ export const AssociatedContextPanel: React.FC<AssociatedContextPanelProps> = ({ 
       </div>
 
       {/* Área de texto com altura livre sem corte */}
-      <div className="p-5 sm:p-6 space-y-3">
+      <div className="p-5 sm:p-6 space-y-3" data-question-selectable="true">
         {context.title && (
           <h3 className="font-semibold text-base sm:text-lg text-primary theme-text-primary leading-snug">
             {context.title}

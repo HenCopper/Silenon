@@ -269,18 +269,18 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
 
   // Filter stem media so any media URL already attached to an option is not duplicated in the stem
   const stemMediaItems = useMemo(() => {
-    if (!question.media || question.media.length === 0) return [];
+    if (!question?.media || question.media.length === 0) return [];
     const optionMediaUrls = new Set<string>();
-    for (const opt of question.options || []) {
-      if (opt.media_url) optionMediaUrls.add(opt.media_url);
-      if (Array.isArray(opt.media)) {
+    for (const opt of question?.options || []) {
+      if (opt?.media_url) optionMediaUrls.add(opt.media_url);
+      if (Array.isArray(opt?.media)) {
         for (const m of opt.media) {
           if (m?.url) optionMediaUrls.add(m.url);
         }
       }
     }
     return question.media.filter((item) => item?.url && !optionMediaUrls.has(item.url));
-  }, [question.media, question.options]);
+  }, [question?.media, question?.options]);
 
   const prevQuestionIdRef = useRef<number | null>(null);
   const prevLastAnswerRef = useRef<UserAnswerRecord | undefined>(lastAnswer);
@@ -651,6 +651,7 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
       {/* Question Stem (Enunciado / Assertivas) - Clean, document-like typography */}
       <div 
         id="question-stem-text"
+        data-question-selectable="true"
         className="text-primary theme-text-primary text-base leading-relaxed whitespace-pre-line font-medium"
       >
         {question.stem.full_text}
@@ -708,7 +709,7 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
       )}
 
       {/* Options List - Sleek, minimalist IDE / Document items with Touch Drag & Mouse elimination */}
-      <div className="space-y-2.5 pt-0.5">
+      <div className="space-y-2.5 pt-0.5" data-question-selectable="true">
         {question.options.map((opt) => {
           const isSelected = selectedLetter === opt.letter;
           const isStriked = currentDisplayedStrikes.includes(opt.letter);

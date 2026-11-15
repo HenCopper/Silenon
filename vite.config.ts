@@ -3,7 +3,12 @@ import react from '@vitejs/plugin-react';
 import fs from 'fs';
 import path from 'path';
 import { defineConfig } from 'vite';
-import { GoogleGenAI, GenerateContentResponse, ThinkingLevel } from '@google/genai';
+import {
+  GoogleGenAI,
+  GenerateContentResponse,
+  Modality,
+  ThinkingLevel,
+} from '@google/genai';
 
 const packageJson = JSON.parse(
   fs.readFileSync(path.resolve(__dirname, 'package.json'), 'utf-8')
@@ -49,6 +54,12 @@ const PER_ATTEMPT_SDK_TIMEOUT_MS = 28000;
 interface IncomingAIMessage {
   role: 'system' | 'user' | 'assistant';
   content: string;
+}
+
+interface IncomingAIAttachment {
+  mimeType: string;
+  data: string;
+  name?: string;
 }
 
 function getUpstreamModelCandidates(resolvedModel: string): string[] {
@@ -123,7 +134,10 @@ function callWithAttemptTimeout<T>(promise: Promise<T>, timeoutMs: number = PER_
   });
 }
 
-function buildGeminiContentsAndSystemInstruction(messages: IncomingAIMessage[]) {
+function buildGeminiContentsAndSystemInstruction(
+  messages: IncomingAIMessage[],
+  attachments?: IncomingAIAttachment[]
+) {
   const safeMessages = Array.isArray(messages) ? messages : [];
   const systemMessages = safeMessages.filter((m) => m && m.role === 'system' && m.content);
   const chatMessages = safeMessages.filter((m) => m && m.role !== 'system' && m.content);
@@ -151,10 +165,31 @@ function buildGeminiContentsAndSystemInstruction(messages: IncomingAIMessage[]) 
     .replace(/^\[Horário da mensagem:[^\]]*\]\s*/i, '')
     .trim();
 
+  const parts: Array<Record<string, any>> = [];
+  if (Array.isArray(attachments)) {
+    for (const att of attachments) {
+      if (att && typeof att.mimeType === 'string' && typeof att.data === 'string') {
+        const cleanData = att.data.replace(/^data:[^;]+;base64,/i, '').trim();
+        if (cleanData) {
+          parts.push({
+            inlineData: {
+              mimeType: att.mimeType.trim(),
+              data: cleanData,
+            },
+          });
+        }
+      }
+    }
+  }
+
+  parts.push({
+    text: cleanLastUserText || rawLastUserText.trim() || baseSystemInstruction || 'Olá',
+  });
+
   const contents = [
     {
       role: 'user',
-      parts: [{ text: cleanLastUserText || rawLastUserText.trim() || baseSystemInstruction || 'Olá' }],
+      parts,
     },
   ];
 
@@ -162,6 +197,193 @@ function buildGeminiContentsAndSystemInstruction(messages: IncomingAIMessage[]) 
     contents,
     systemInstruction: baseSystemInstruction || undefined,
   };
+}
+
+function pcm16MonoToWavBuffer(pcmBuffer: Buffer, sampleRate: number = 24000): Buffer {
+  const numChannels = 1;
+  const bitsPerSample = 16;
+  const byteRate = (sampleRate * numChannels * bitsPerSample) / 8;
+  const blockAlign = (numChannels * bitsPerSample) / 8;
+  const dataSize = pcmBuffer.length;
+  const header = Buffer.alloc(44);
+
+  header.write('RIFF', 0);
+  header.writeUInt32LE(36 + dataSize, 4);
+  header.write('WAVE', 8);
+  header.write('fmt ', 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(numChannels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(bitsPerSample, 34);
+  header.write('data', 36);
+  header.writeUInt32LE(dataSize, 40);
+
+  return Buffer.concat([header, pcmBuffer]);
+}
+
+interface TtsSynthesisAttempt {
+  model: string;
+  status: number;
+  error?: string;
+  durationMs: number;
+}
+
+function hasRiffWavHeader(buf: Buffer): boolean {
+  return (
+    buf.length >= 12 &&
+    buf.subarray(0, 4).toString('ascii') === 'RIFF' &&
+    buf.subarray(8, 12).toString('ascii') === 'WAVE'
+  );
+}
+
+async function synthesizeSpeechWithGeminiTts(
+  ai: GoogleGenAI,
+  textToSpeak: string
+): Promise<{
+  audioBase64: string;
+  mimeType: string;
+  modelUsed: string;
+  upstreamModelUsed: string;
+  attempts: TtsSynthesisAttempt[];
+}> {
+  const cleanText = String(textToSpeak || '').trim();
+  if (!cleanText) {
+    const emptyTextErr: any = new Error('Texto vazio para síntese de voz.');
+    emptyTextErr.status = 400;
+    emptyTextErr.attempts = [];
+    throw emptyTextErr;
+  }
+
+  const ttsCandidates = [
+    'gemini-2.5-flash-preview-tts',
+    'gemini-2.5-flash-native-audio-preview-12-2025',
+    'gemini-3.8-flash-lite-tts',
+  ];
+  const attempts: TtsSynthesisAttempt[] = [];
+  let lastStatus = 502;
+
+  for (const candidateModel of ttsCandidates) {
+    const attemptStart = Date.now();
+    try {
+      const response = await callWithAttemptTimeout(
+        ai.models.generateContent({
+          model: candidateModel,
+          contents: [
+            {
+              role: 'user',
+              parts: [{ text: cleanText }],
+            },
+          ],
+          config: {
+            responseModalities: [Modality.AUDIO],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: {
+                  voiceName: 'Zephyr',
+                },
+              },
+            },
+          },
+        }),
+        20000
+      );
+
+      const parts = response.candidates?.[0]?.content?.parts || [];
+      const audioPart = parts.find(
+        (p: any) => typeof p?.inlineData?.data === 'string' && p.inlineData.data.trim().length > 0
+      );
+
+      if (!audioPart?.inlineData?.data) {
+        const blockReason = (response as any)?.promptFeedback?.blockReason;
+        const finishReason = response.candidates?.[0]?.finishReason;
+        throw new Error(
+          `Nenhum áudio inlineData retornado por ${candidateModel} (finishReason=${finishReason || 'N/A'}, blockReason=${blockReason || 'N/A'}).`
+        );
+      }
+
+      const rawBase64 = String(audioPart.inlineData.data).trim();
+      const rawMime = String(audioPart.inlineData.mimeType || '').trim();
+      const lowerMime = rawMime.toLowerCase();
+      const rawBuffer = Buffer.from(rawBase64, 'base64');
+
+      if (rawBuffer.length === 0) {
+        throw new Error(`Buffer de áudio vazio retornado por ${candidateModel}.`);
+      }
+
+      let finalBase64 = rawBase64;
+      let finalMimeType = 'audio/wav';
+
+      if (hasRiffWavHeader(rawBuffer)) {
+        finalBase64 = rawBase64;
+        finalMimeType = 'audio/wav';
+      } else if (
+        lowerMime.includes('mp3') ||
+        lowerMime.includes('mpeg') ||
+        lowerMime.includes('ogg') ||
+        lowerMime.includes('webm') ||
+        lowerMime.includes('aac') ||
+        lowerMime.includes('mp4')
+      ) {
+        finalBase64 = rawBase64;
+        finalMimeType = rawMime;
+      } else {
+        const rateMatch = rawMime.match(/rate=(\d+)/i);
+        const parsedRate = rateMatch ? Number(rateMatch[1]) : 24000;
+        const sampleRate = Number.isFinite(parsedRate) && parsedRate > 0 ? parsedRate : 24000;
+        const wavBuffer = pcm16MonoToWavBuffer(rawBuffer, sampleRate);
+        finalBase64 = wavBuffer.toString('base64');
+        finalMimeType = 'audio/wav';
+      }
+
+      if (!finalBase64) {
+        throw new Error(`Falha ao codificar áudio WAV final em ${candidateModel}.`);
+      }
+
+      attempts.push({
+        model: candidateModel,
+        status: 200,
+        durationMs: Date.now() - attemptStart,
+      });
+
+      return {
+        audioBase64: finalBase64,
+        mimeType: finalMimeType,
+        modelUsed: candidateModel,
+        upstreamModelUsed: candidateModel,
+        attempts,
+      };
+    } catch (err: any) {
+      const errStatus =
+        typeof err?.status === 'number' && err.status >= 400 && err.status < 600
+          ? err.status
+          : 502;
+      lastStatus = errStatus;
+      const errMsg = err?.message || String(err);
+      attempts.push({
+        model: candidateModel,
+        status: errStatus,
+        error: errMsg,
+        durationMs: Date.now() - attemptStart,
+      });
+
+      if (errStatus === 401 || errStatus === 403) {
+        break;
+      }
+    }
+  }
+
+  const combinedErrors = attempts
+    .map((a) => `${a.model}: ${a.error || 'falha desconhecida'} (${a.durationMs}ms)`)
+    .join(' | ');
+  const finalErr: any = new Error(
+    `Falha na síntese de voz TTS em todos os candidatos: ${combinedErrors}`
+  );
+  finalErr.status = lastStatus;
+  finalErr.attempts = attempts;
+  throw finalErr;
 }
 
 export default defineConfig(() => {
@@ -293,7 +515,8 @@ export default defineConfig(() => {
                 const thinkingEnum = resolveThinkingLevelEnum(parsedBody?.thinkingLevel);
                 const candidates = getUpstreamModelCandidates(resolvedModel);
                 const { contents, systemInstruction } = buildGeminiContentsAndSystemInstruction(
-                  parsedBody?.messages
+                  parsedBody?.messages,
+                  parsedBody?.attachments
                 );
 
                 const ai = new GoogleGenAI({
@@ -352,8 +575,11 @@ export default defineConfig(() => {
                     candidateModel === 'gemini-4-hydrogen' ||
                     candidateModel === 'gemini-3.8-flash' ||
                     candidateModel === 'gemini-3.6-flash';
+                  const isGemmaModel = candidateModel.toLowerCase().startsWith('gemma-');
                   const thinkingSequence: Array<ThinkingLevel | undefined> =
-                    thinkingEnum === ThinkingLevel.HIGH && isGemini3FlashBoost
+                    isGemmaModel
+                      ? [undefined]
+                      : thinkingEnum === ThinkingLevel.HIGH && isGemini3FlashBoost
                       ? [ThinkingLevel.HIGH, ThinkingLevel.LOW, undefined]
                       : thinkingEnum === ThinkingLevel.HIGH
                       ? [ThinkingLevel.HIGH, ThinkingLevel.LOW, undefined]
@@ -375,10 +601,26 @@ export default defineConfig(() => {
                         : { ...baseConfig };
                       delete reqConfig.maxOutputTokens;
 
+                      let attemptContents = contents;
+                      if (isGemmaModel) {
+                        delete reqConfig.responseMimeType;
+                        if (reqConfig.systemInstruction) {
+                          const sysText = String(reqConfig.systemInstruction);
+                          delete reqConfig.systemInstruction;
+                          const firstParts = Array.isArray(contents?.[0]?.parts) ? contents[0].parts : [];
+                          attemptContents = [
+                            {
+                              role: 'user',
+                              parts: [{ text: `${sysText}\n\n` }, ...firstParts],
+                            },
+                          ];
+                        }
+                      }
+
                       const attemptResp = await callWithAttemptTimeout(
                         ai.models.generateContent({
                           model: candidateModel,
-                          contents,
+                          contents: attemptContents,
                           config: reqConfig,
                         }),
                         PER_ATTEMPT_SDK_TIMEOUT_MS
@@ -505,6 +747,99 @@ export default defineConfig(() => {
             });
           });
 
+          server.middlewares.use('/api/groq/chat', (req, res) => {
+            if (req.method !== 'POST') {
+              res.writeHead(405, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Method Not Allowed' }));
+              return;
+            }
+
+            let rawBody = '';
+            req.on('data', chunk => { rawBody += chunk; });
+            req.on('end', async () => {
+              try {
+                const parsedBody = rawBody ? JSON.parse(rawBody) : {};
+                const headerGroqKey = req.headers['x-groq-api-key'];
+                const authHeader = req.headers['authorization'];
+                const fromHeader = Array.isArray(headerGroqKey) ? headerGroqKey[0] : headerGroqKey;
+                const fromAuth =
+                  typeof authHeader === 'string' && authHeader.toLowerCase().startsWith('bearer ')
+                    ? authHeader.slice(7)
+                    : '';
+                const fromBody = typeof parsedBody?.apiKey === 'string' ? parsedBody.apiKey : '';
+                const clientGroqKey = String(fromHeader || fromAuth || fromBody || '').trim();
+
+                if (!clientGroqKey) {
+                  res.writeHead(401, { 'Content-Type': 'application/json' });
+                  res.end(JSON.stringify({ error: 'Chave Groq (BYOK) ausente.' }));
+                  return;
+                }
+
+                const targetModel =
+                  typeof parsedBody?.model === 'string' && parsedBody.model.trim()
+                    ? parsedBody.model.trim()
+                    : 'openai/gpt-oss-120b';
+                const bodyPayload: Record<string, unknown> = {
+                  model: targetModel,
+                  messages: Array.isArray(parsedBody?.messages) ? parsedBody.messages : [],
+                  temperature: typeof parsedBody?.temperature === 'number' ? parsedBody.temperature : 0.45,
+                };
+                if (parsedBody?.jsonMode) {
+                  bodyPayload.response_format = { type: 'json_object' };
+                }
+
+                const upstreamResp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${clientGroqKey}`,
+                  },
+                  body: JSON.stringify(bodyPayload),
+                });
+
+                if (!upstreamResp.ok) {
+                  const errText = await upstreamResp.text().catch(() => '');
+                  res.writeHead(upstreamResp.status, { 'Content-Type': 'application/json' });
+                  res.end(
+                    JSON.stringify({
+                      error: `Groq [${targetModel}] HTTP ${upstreamResp.status}: ${errText}`,
+                      status: upstreamResp.status,
+                    })
+                  );
+                  return;
+                }
+
+                const data: any = await upstreamResp.json();
+                const text: string = data?.choices?.[0]?.message?.content || '';
+                if (!text) {
+                  res.writeHead(502, { 'Content-Type': 'application/json' });
+                  res.end(JSON.stringify({ error: `Groq [${targetModel}] retornou resposta vazia.` }));
+                  return;
+                }
+
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(
+                  JSON.stringify({
+                    text,
+                    modelUsed: data?.model || targetModel,
+                    status: upstreamResp.status,
+                  })
+                );
+              } catch (err: any) {
+                const status =
+                  typeof err?.status === 'number' && err.status >= 400 && err.status < 600
+                    ? err.status
+                    : 500;
+                res.writeHead(status, { 'Content-Type': 'application/json' });
+                res.end(
+                  JSON.stringify({
+                    error: err?.message || String(err) || 'Erro interno ao chamar Groq.',
+                  })
+                );
+              }
+            });
+          });
+
           server.middlewares.use('/api/gemini/audio-dialog', (req, res) => {
             if (req.method !== 'POST') {
               res.writeHead(405, { 'Content-Type': 'application/json' });
@@ -577,11 +912,27 @@ export default defineConfig(() => {
                 }
 
                 if (action === 'speak' && textToSpeak) {
+                  const ttsAudio = await synthesizeSpeechWithGeminiTts(ai, String(textToSpeak));
+                  if (!ttsAudio?.audioBase64 || !String(ttsAudio.audioBase64).trim()) {
+                    const emptyErr: any = new Error(
+                      'Gemini TTS retornou audioBase64 vazio após a síntese.'
+                    );
+                    emptyErr.status = 502;
+                    emptyErr.attempts = ttsAudio?.attempts || [];
+                    throw emptyErr;
+                  }
                   res.writeHead(200, { 'Content-Type': 'application/json' });
                   res.end(
                     JSON.stringify({
+                      audioBase64: ttsAudio.audioBase64,
+                      mimeType: ttsAudio.mimeType,
                       spokenText: String(textToSpeak),
-                      modelUsed: 'gemini-2.0-flash-native-audio-dialog',
+                      modelUsed: ttsAudio.modelUsed,
+                      upstreamModelUsed: ttsAudio.upstreamModelUsed,
+                      attempts: ttsAudio.attempts,
+                      debugMeta: {
+                        attempts: ttsAudio.attempts,
+                      },
                     })
                   );
                   return;
@@ -590,8 +941,18 @@ export default defineConfig(() => {
                 res.writeHead(400, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: 'Ação inválida em /api/gemini/audio-dialog.' }));
               } catch (err: any) {
-                res.writeHead(500, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ error: err?.message || 'Erro no Gemini Native Audio Dialog.' }));
+                const status = typeof err?.status === 'number' && err.status >= 400 ? err.status : 502;
+                const attempts = Array.isArray(err?.attempts) ? err.attempts : [];
+                res.writeHead(status, { 'Content-Type': 'application/json' });
+                res.end(
+                  JSON.stringify({
+                    error: err?.message || 'Erro no Gemini Native Audio Dialog.',
+                    attempts,
+                    debugMeta: {
+                      attempts,
+                    },
+                  })
+                );
               }
             });
           });

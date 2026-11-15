@@ -12,9 +12,13 @@ import {
   KeyRound,
   Keyboard,
   UserCheck,
-  Lightbulb
+  Lightbulb,
+  MessageSquareWarning,
+  ExternalLink
 } from 'lucide-react';
+import { StudyMode } from '../types/question';
 import { usePWAInstall } from '../hooks/usePWAInstall';
+import { saveLastActiveStudyMode, LAST_ACTIVE_MODE_STORAGE_KEY } from '../hooks/useStudyCarousel';
 import { APP_VERSION, APP_BUILD_ID, checkAppUpdate, forcePurgeAndReload } from '../lib/versionManager';
 import { MemorizLogo } from './MemorizLogo';
 import { ConfirmModal } from './ConfirmModal';
@@ -25,6 +29,7 @@ interface AppInfoModalProps {
   isOpen: boolean;
   onClose: () => void;
   totalQuestions?: number;
+  currentMode?: StudyMode;
   isDevUser?: boolean;
   onOpenKitchenSink?: () => void;
   onOpenDatabaseManager?: () => void;
@@ -37,6 +42,7 @@ export const AppInfoModal: React.FC<AppInfoModalProps> = ({
   isOpen,
   onClose,
   totalQuestions = 0,
+  currentMode = 'practice',
   onOpenDatabaseManager,
   onOpenShortcuts,
   onOpenBYOKModal,
@@ -102,7 +108,7 @@ export const AppInfoModal: React.FC<AppInfoModalProps> = ({
                 </span>
               </div>
               <p className="text-xs text-secondary theme-text-secondary mt-1">
-                Simples no silício • Sistema & Modo Offline
+                Simples no silício • Sistema e Modo Offline
               </p>
             </div>
           </div>
@@ -135,8 +141,8 @@ export const AppInfoModal: React.FC<AppInfoModalProps> = ({
                 <div className="font-semibold text-primary text-xs truncate">
                   Bancos de Questões
                 </div>
-                <div className="text-[11px] text-muted truncate font-mono">
-                  .JSON / .ZIP
+                <div className="text-[11px] text-muted truncate">
+                  Arquivos de Prova
                 </div>
               </div>
             </button>
@@ -154,10 +160,10 @@ export const AppInfoModal: React.FC<AppInfoModalProps> = ({
               </div>
               <div className="min-w-0">
                 <div className="font-semibold text-primary text-xs truncate">
-                  Chaves de API
+                  Chaves de Acesso
                 </div>
                 <div className="text-[11px] text-muted truncate">
-                  Gemini & Groq
+                  Google e Groq
                 </div>
               </div>
             </button>
@@ -196,10 +202,10 @@ export const AppInfoModal: React.FC<AppInfoModalProps> = ({
               </div>
               <div className="min-w-0">
                 <div className="font-semibold text-primary text-xs truncate">
-                  Perfil & Metas
+                  Perfil e Metas
                 </div>
                 <div className="text-[11px] text-muted truncate">
-                  Conta & XP
+                  Conta e XP
                 </div>
               </div>
             </button>
@@ -207,7 +213,10 @@ export const AppInfoModal: React.FC<AppInfoModalProps> = ({
 
           {/* LINHA LIMPA: EXIBIR DICAS DE USO */}
           <div
-            onClick={() => setShowTips(!showTips)}
+            onClick={(e) => {
+              if ((e.target as HTMLElement)?.closest('[role="switch"]')) return;
+              setShowTips(!showTips);
+            }}
             className="flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-xl border border-border bg-surface-subtle hover:bg-surface-hover transition-colors cursor-pointer select-none"
           >
             <div className="flex items-center gap-2.5 min-w-0">
@@ -219,16 +228,48 @@ export const AppInfoModal: React.FC<AppInfoModalProps> = ({
             <LiveSwitch
               id="app-info-toggle-tips"
               checked={showTips}
-              onChange={() => setShowTips(!showTips)}
+              onChange={(nextVal) => setShowTips(nextVal)}
             />
           </div>
 
-          {/* SECTION 1: INSTALAR APLICATIVO / PWA */}
+          {/* CARD DISCRETO: FEEDBACK & REPORTAR ERRO (/report) */}
+          <a
+            href={`/report?mode=${encodeURIComponent(currentMode)}`}
+            onClick={(e) => {
+              e.preventDefault();
+              saveLastActiveStudyMode(currentMode);
+              try {
+                sessionStorage.setItem(LAST_ACTIVE_MODE_STORAGE_KEY, currentMode);
+                localStorage.setItem(LAST_ACTIVE_MODE_STORAGE_KEY, currentMode);
+              } catch {
+                // Ignore storage errors
+              }
+              window.location.href = `/report?mode=${encodeURIComponent(currentMode)}`;
+            }}
+            className="flex items-center justify-between gap-3 p-3 rounded-xl border border-border bg-surface-subtle hover:bg-surface-hover transition-colors cursor-pointer group"
+          >
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="w-9 h-9 rounded-lg bg-surface border border-border flex items-center justify-center shrink-0 text-accent group-hover:border-accent/40 transition-colors">
+                <MessageSquareWarning className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="font-semibold text-primary text-xs truncate">
+                  Feedback e Reportar Erro
+                </div>
+                <div className="text-[11px] text-muted truncate">
+                  Avaliar o app, relatar problema ou falar com o criador
+                </div>
+              </div>
+            </div>
+            <ExternalLink className="w-3.5 h-3.5 text-muted group-hover:text-accent transition-colors shrink-0" />
+          </a>
+
+          {/* SECTION 1: INSTALAR APLICATIVO */}
           <div className="p-4 rounded-xl border border-accent-subtle-border bg-accent-subtle/30 space-y-3">
             <div className="flex items-center justify-between">
               <span className="font-semibold text-primary theme-text-primary flex items-center gap-1.5 text-[13px]">
                 <Smartphone className="w-4 h-4 text-accent" />
-                Instalação do Aplicativo (PWA)
+                Instalar Aplicativo
               </span>
 
               {isStandalone ? (
@@ -241,19 +282,19 @@ export const AppInfoModal: React.FC<AppInfoModalProps> = ({
                   className="text-[11px] text-muted theme-text-muted hover:text-secondary transition-colors cursor-pointer select-none"
                   title="Clique para configurar a exibição de dicas"
                 >
-                  Tela Cheia Nativa
+                  Tela Cheia no Aparelho
                 </span>
               ) : null}
             </div>
 
             {isStandalone ? (
               <p className="text-secondary theme-text-secondary leading-relaxed text-xs">
-                O <strong>Silenon</strong> já está instalado e em execução no modo aplicativo independente. Você desfruta de tela cheia sem barras de navegador, inicialização instantânea e suporte offline total.
+                O <strong>Silenon</strong> já está instalado e em execução no seu aparelho. Você desfruta de tela cheia sem barras de navegador, inicialização instantânea e suporte offline total.
               </p>
             ) : (
               <>
                 <p className="text-secondary theme-text-secondary leading-relaxed text-xs">
-                  Instale o Silenon na sua tela inicial para utilizá-lo como um aplicativo nativo no celular, tablet ou computador. Abre sem a barra de endereço do navegador e funciona 100% offline.
+                  Instale o Silenon na sua tela inicial para utilizá-lo como um aplicativo no celular, tablet ou computador. Abre sem a barra de endereço do navegador e funciona 100% offline.
                 </p>
 
                 <button
@@ -262,7 +303,7 @@ export const AppInfoModal: React.FC<AppInfoModalProps> = ({
                   className="w-full py-2.5 px-4 rounded-xl font-semibold theme-btn-accent text-xs flex items-center justify-center gap-2 cursor-pointer shadow-sm hover:opacity-95 transition-all"
                 >
                   <Download className="w-4 h-4" />
-                  <span>Instalar Silenon no Dispositivo</span>
+                  <span>Instalar Silenon no Aparelho</span>
                 </button>
               </>
             )}
@@ -273,7 +314,7 @@ export const AppInfoModal: React.FC<AppInfoModalProps> = ({
             <div className="flex items-center justify-between">
               <span className="font-semibold text-primary theme-text-primary flex items-center gap-1.5 text-[13px]">
                 <HardDrive className="w-4 h-4 text-success" />
-                Funcionamento Offline & Rede
+                Funcionamento Offline e Rede
               </span>
 
               {isOnline ? (
@@ -290,7 +331,7 @@ export const AppInfoModal: React.FC<AppInfoModalProps> = ({
             </div>
 
             <p className="text-secondary theme-text-secondary leading-relaxed">
-              O Silenon armazena todo o código, interface e banco de questões no cache local do dispositivo. Quando você estiver sem internet, o aplicativo continuará abrindo e respondendo com máxima velocidade.
+              O Silenon salva suas provas, questões e estatísticas diretamente no seu aparelho. Quando você estiver sem internet, o aplicativo continuará abrindo e respondendo com máxima velocidade.
             </p>
 
             {/* Check Update Button & Feedback */}
@@ -308,9 +349,9 @@ export const AppInfoModal: React.FC<AppInfoModalProps> = ({
               <button
                 onClick={handleManualPurge}
                 className="py-2 px-3.5 rounded-lg theme-btn-secondary hover:border-danger-border hover:bg-danger-bg hover:text-danger text-xs font-medium transition-colors cursor-pointer"
-                title="Limpa cache de arquivos e recarrega versão fresca (requer internet)"
+                title="Limpa arquivos temporários e recarrega a versão mais recente (requer internet)"
               >
-                Limpar Cache Local
+                Limpar Dados Temporários
               </button>
             </div>
 
@@ -359,8 +400,8 @@ export const AppInfoModal: React.FC<AppInfoModalProps> = ({
 
       <ConfirmModal
         isOpen={showPurgeConfirm}
-        title="Limpar Cache & Recarregar"
-        message="Deseja limpar todos os dados de cache do navegador e recarregar o aplicativo? (Requer internet)"
+        title="Limpar Dados Temporários e Recarregar"
+        message="Deseja limpar os dados temporários e recarregar o aplicativo? Suas questões e progresso salvo no aparelho serão preservados. (Requer internet)"
         confirmLabel="Limpar e Recarregar"
         cancelLabel="Cancelar"
         variant="warning"

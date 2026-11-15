@@ -16,6 +16,9 @@ import {
   Target,
   ShieldCheck,
   ChevronsUp,
+  Paperclip,
+  Trash2,
+  Pencil,
 } from 'lucide-react';
 import { Question, UserAnswerRecord, UserStatistics } from '../types/question';
 import { GeminiIcon } from './icons/BrandIcons';
@@ -46,6 +49,13 @@ import {
   recordOrchestratorRuntimeError,
   generateDynamicStriveSuggestions,
   getCachedStriveSuggestions,
+  StriveGeneratedGraph,
+  extractGraphMarkersFromText,
+  generateAndValidateStriveGraphSVG,
+  sanitizeTextForSpeech,
+  notifyQuatNativeAudioDialog,
+  AIAttachmentPayload,
+  mapToStudentFriendlyError,
 } from '../lib/aiOrchestrator';
 import {
   getUnanalyzedQuestionThreads,
@@ -62,6 +72,16 @@ interface GlobalAssistantPopoverProps {
   answers: Record<number, UserAnswerRecord[]> | UserAnswerRecord[];
   questions: Question[];
   currentQuestion?: Question | null;
+  pendingQuote?: { text: string; timestamp: number } | null;
+  onConsumePendingQuote?: () => void;
+}
+
+interface PendingAttachmentItem {
+  id: string;
+  name: string;
+  mimeType: string;
+  data: string;
+  previewUrl?: string;
 }
 
 interface GlobalChatMessage {
@@ -70,6 +90,7 @@ interface GlobalChatMessage {
   content: string;
   timestamp: number;
   modelUsed?: string;
+  generatedGraphs?: Record<string, StriveGeneratedGraph>;
 }
 
 const GLOBAL_CHAT_STORAGE_KEY = 'memoriz_global_chat_history_v1';
@@ -83,6 +104,8 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
   answers,
   questions,
   currentQuestion,
+  pendingQuote,
+  onConsumePendingQuote,
 }) => {
   const [activeTab, setActiveTab] = useState<'chat' | 'diagnosis' | 'improve'>('chat');
   const [accumulatedTokens, setAccumulatedTokens] = useState<number>(0);
@@ -119,6 +142,10 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
     return [];
   });
   const [inputText, setInputText] = useState<string>('');
+  const [pendingAttachments, setPendingAttachments] = useState<PendingAttachmentItem[]>([]);
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [editingMessageText, setEditingMessageText] = useState<string>('');
+  const [isDraggingFiles, setIsDraggingFiles] = useState<boolean>(false);
   const [visibleChatCount, setVisibleChatCount] = useState<number>(30);
   const [isSendingChat, setIsSendingChat] = useState<boolean>(false);
   const [isListeningVoice, setIsListeningVoice] = useState<boolean>(false);
@@ -135,7 +162,37 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
   const recognitionRef = useRef<any>(null);
   const liquidPopoverRef = useRef<HTMLDivElement | null>(null);
   const liquidPopoverMenuRef = useRef<HTMLDivElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const dragDepthRef = useRef<number>(0);
+  const spokenAudioCacheRef = useRef<Map<string, { audioBase64: string; mimeType: string }>>(
+    new Map()
+  );
+  const activeAudioElementRef = useRef<HTMLAudioElement | null>(null);
+  const speakingAbortIdRef = useRef<string | null>(null);
   const dragControls = useDragControls();
+
+  // Pre-fill input when user clicks "Perguntar ao Strive" on a text selection
+  useEffect(() => {
+    if (!pendingQuote || !pendingQuote.text) return;
+    setActiveTab('chat');
+    const cleanQuote = pendingQuote.text.replace(/\s+/g, ' ').trim();
+    const formattedQuote = `“${cleanQuote}” — `;
+    setInputText(formattedQuote);
+    onConsumePendingQuote?.();
+    const timer = window.setTimeout(() => {
+      const el = chatInputRef.current;
+      if (el) {
+        el.focus();
+        try {
+          el.setSelectionRange(formattedQuote.length, formattedQuote.length);
+        } catch {
+          // Ignore
+        }
+      }
+    }, 120);
+    return () => window.clearTimeout(timer);
+  }, [pendingQuote, onConsumePendingQuote]);
 
   // Dynamic header title accompanying the active tab + "• Enem" before 15/11/2026 13:00 BRT
   const baseTabTitle =
@@ -199,6 +256,10 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
       }
       setIsListeningVoice(false);
       setIsLiquidPopoverOpen(false);
+      setEditingMessageId(null);
+      setEditingMessageText('');
+      setIsDraggingFiles(false);
+      dragDepthRef.current = 0;
       setVisibleChatCount(30);
       return;
     }
@@ -250,17 +311,26 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
     return () => document.removeEventListener('mousedown', handlePointerDownOutside);
   }, [isLiquidPopoverOpen]);
 
-  // Close full-screen panel with Escape key in capture phase (priority: Debug Panel -> Liquid Popover -> Strive)
+  // Close full-screen panel with Escape key in capture phase (priority: Graph Modal -> Debug Panel -> Liquid Popover -> Editing Message -> Strive)
   useEffect(() => {
     if (!isOpen && !isDebugPanelOpen) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        if (
+          typeof document !== 'undefined' &&
+          document.querySelector('[data-strive-graph-modal="true"]')
+        ) {
+          return;
+        }
         e.preventDefault();
         e.stopPropagation();
         if (isDebugPanelOpen) {
           setIsDebugPanelOpen(false);
         } else if (isLiquidPopoverOpen) {
           setIsLiquidPopoverOpen(false);
+        } else if (editingMessageId) {
+          setEditingMessageId(null);
+          setEditingMessageText('');
         } else if (isOpen) {
           onClose();
         }
@@ -268,7 +338,57 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
     };
     window.addEventListener('keydown', handleKeyDown, { capture: true });
     return () => window.removeEventListener('keydown', handleKeyDown, { capture: true });
-  }, [isOpen, isLiquidPopoverOpen, isDebugPanelOpen, onClose]);
+  }, [isOpen, isLiquidPopoverOpen, isDebugPanelOpen, editingMessageId, onClose]);
+
+  const inFlightGraphKeysRef = useRef<Set<string>>(new Set());
+
+  // Processa em segundo plano marcadores [[GRAFICO: ...]] nas respostas do Strive sem travar o chat
+  useEffect(() => {
+    for (const msg of chatMessages) {
+      if (msg.role !== 'assistant' || !msg.content) continue;
+      const markers = extractGraphMarkersFromText(msg.content);
+      if (markers.length === 0) continue;
+
+      for (const marker of markers) {
+        const existing = msg.generatedGraphs?.[marker.key];
+        if (existing && existing.status === 'ready' && existing.svg) continue;
+
+        const flightId = `${msg.id}::${marker.key}`;
+        if (inFlightGraphKeysRef.current.has(flightId)) continue;
+        inFlightGraphKeysRef.current.add(flightId);
+
+        generateAndValidateStriveGraphSVG({
+          title: marker.title,
+          description: marker.description,
+          contextSummary: msg.content.slice(0, 600),
+        })
+          .then((svg) => {
+            setChatMessages((prev) =>
+              prev.map((item) =>
+                item.id === msg.id
+                  ? {
+                      ...item,
+                      generatedGraphs: {
+                        ...(item.generatedGraphs || {}),
+                        [marker.key]: {
+                          key: marker.key,
+                          title: marker.title,
+                          description: marker.description,
+                          svg,
+                          status: 'ready',
+                        },
+                      },
+                    }
+                  : item
+              )
+            );
+          })
+          .catch(() => {
+            inFlightGraphKeysRef.current.delete(flightId);
+          });
+      }
+    }
+  }, [chatMessages]);
 
   // Persist global chat history (up to 120 messages so "Carregar anteriores" can page beyond the initial 30)
   useEffect(() => {
@@ -518,7 +638,10 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
       setUnanalyzedThreads(remainingUnanalyzed);
       setAccumulatedTokens(syncQuatTokensFromThreads(remainingUnanalyzed));
     } catch (err: any) {
-      setErrorBanner(err?.message || 'Não foi possível gerar o diagnóstico agora.');
+      const friendly = mapToStudentFriendlyError(
+        err?.message || 'Não foi possível gerar o diagnóstico agora.'
+      );
+      setErrorBanner(friendly.displayText);
       setHighQuota(getHighModelsQuotaState());
     } finally {
       setIsGeneratingDiagnosis(false);
@@ -526,11 +649,172 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
     }
   };
 
-  // Handle sending a message in Global Chat
-  const handleSendChatMessage = async (e?: React.FormEvent, customMessage?: string) => {
-    if (e) e.preventDefault();
-    const messageToSend = (customMessage ?? inputText).trim();
-    if (!messageToSend || isSendingChat) return;
+  const processAttachedFiles = async (filesInput: FileList | File[]) => {
+    const files: File[] = Array.from(filesInput || []);
+    if (files.length === 0) return;
+
+    const loadedItems: PendingAttachmentItem[] = [];
+    for (const file of files) {
+      if (!file.type.startsWith('image/') && !file.type.startsWith('audio/')) {
+        continue;
+      }
+      try {
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result || ''));
+          reader.onerror = () => reject(reader.error || new Error('Erro ao ler arquivo'));
+          reader.readAsDataURL(file);
+        });
+        const base64Data = dataUrl.replace(/^data:[^;]+;base64,/i, '').trim();
+        if (!base64Data) continue;
+        loadedItems.push({
+          id: `att_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+          name: file.name || (file.type.startsWith('image/') ? 'imagem.jpg' : 'audio.mp3'),
+          mimeType: file.type || 'application/octet-stream',
+          data: base64Data,
+          previewUrl: file.type.startsWith('image/') ? dataUrl : undefined,
+        });
+      } catch {
+        // Ignore unreadable file
+      }
+    }
+
+    if (loadedItems.length > 0) {
+      setPendingAttachments((prev) => [...prev, ...loadedItems].slice(0, 6));
+    }
+  };
+
+  const handleSelectAttachments = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const fileList = e.target.files;
+    if (!fileList || fileList.length === 0) return;
+    const files: File[] = Array.from(fileList);
+    e.target.value = '';
+    await processAttachedFiles(files);
+  };
+
+  const handleRemoveAttachment = (id: string) => {
+    setPendingAttachments((prev) => prev.filter((item) => item.id !== id));
+  };
+
+  const hasFilesInDataTransfer = (dt: React.DragEvent['dataTransfer'] | null): boolean => {
+    if (!dt) return false;
+    if (dt.types && Array.from(dt.types).includes('Files')) return true;
+    return Boolean(dt.files && dt.files.length > 0);
+  };
+
+  const handleChatDragEnter = (e: React.DragEvent<HTMLDivElement>) => {
+    if (!hasFilesInDataTransfer(e.dataTransfer)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    dragDepthRef.current += 1;
+    if (!isDraggingFiles) {
+      setIsDraggingFiles(true);
+    }
+  };
+
+  const handleChatDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    if (!hasFilesInDataTransfer(e.dataTransfer)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = 'copy';
+    if (!isDraggingFiles) {
+      setIsDraggingFiles(true);
+    }
+  };
+
+  const handleChatDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
+    if (!hasFilesInDataTransfer(e.dataTransfer) && !isDraggingFiles) return;
+    e.preventDefault();
+    e.stopPropagation();
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) {
+      setIsDraggingFiles(false);
+    }
+  };
+
+  const handleChatDrop = async (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragDepthRef.current = 0;
+    setIsDraggingFiles(false);
+    if (e.dataTransfer?.files && e.dataTransfer.files.length > 0) {
+      await processAttachedFiles(e.dataTransfer.files);
+    }
+  };
+
+  const handlePasteAttachment = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const clipboardData = e.clipboardData;
+    if (!clipboardData) return;
+
+    const pastedFiles: File[] = [];
+    if (clipboardData.files && clipboardData.files.length > 0) {
+      for (let i = 0; i < clipboardData.files.length; i++) {
+        const file = clipboardData.files[i];
+        if (file && (file.type.startsWith('image/') || file.type.startsWith('audio/'))) {
+          pastedFiles.push(file);
+        }
+      }
+    }
+    if (pastedFiles.length === 0 && clipboardData.items && clipboardData.items.length > 0) {
+      for (let i = 0; i < clipboardData.items.length; i++) {
+        const item = clipboardData.items[i];
+        if (
+          item &&
+          item.kind === 'file' &&
+          (item.type.startsWith('image/') || item.type.startsWith('audio/'))
+        ) {
+          const f = item.getAsFile();
+          if (f) pastedFiles.push(f);
+        }
+      }
+    }
+
+    if (pastedFiles.length > 0) {
+      await processAttachedFiles(pastedFiles);
+    }
+  };
+
+  const handleDeleteMessage = (msgId: string) => {
+    if (speakingMessageId === msgId) {
+      stopActiveSpeechPlayback();
+      setSpeakingMessageId(null);
+    }
+    spokenAudioCacheRef.current.delete(msgId);
+    if (editingMessageId === msgId) {
+      setEditingMessageId(null);
+      setEditingMessageText('');
+    }
+    setChatMessages((prev) => {
+      const next = prev.filter((m) => m.id !== msgId);
+      if (typeof window !== 'undefined') {
+        try {
+          localStorage.setItem(GLOBAL_CHAT_STORAGE_KEY, JSON.stringify(next.slice(-120)));
+        } catch {
+          // Ignore
+        }
+      }
+      return next;
+    });
+  };
+
+  const handleStartEditMessage = (msg: GlobalChatMessage) => {
+    if (msg.role !== 'user') return;
+    setEditingMessageId(msg.id);
+    setEditingMessageText(msg.content);
+  };
+
+  const handleCancelEditMessage = () => {
+    setEditingMessageId(null);
+    setEditingMessageText('');
+  };
+
+  const handleSaveEditedMessage = async (msgId: string) => {
+    if (isSendingChat) return;
+    const trimmedText = editingMessageText.trim();
+    if (!trimmedText) return;
+
+    const targetIdx = chatMessages.findIndex((m) => m.id === msgId && m.role === 'user');
+    if (targetIdx === -1) return;
 
     if (isListeningVoice && recognitionRef.current) {
       try {
@@ -541,17 +825,34 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
       setIsListeningVoice(false);
     }
 
+    if (speakingMessageId) {
+      stopActiveSpeechPlayback();
+      setSpeakingMessageId(null);
+    }
+
+    for (let i = targetIdx; i < chatMessages.length; i++) {
+      spokenAudioCacheRef.current.delete(chatMessages[i].id);
+    }
+
+    const previousMessages = chatMessages;
     const nowMs = Date.now();
-    const userMsg: GlobalChatMessage = {
-      id: `msg_${nowMs}_u`,
-      role: 'user',
-      content: messageToSend,
+    const editedUserMsg: GlobalChatMessage = {
+      ...chatMessages[targetIdx],
+      content: trimmedText,
       timestamp: nowMs,
     };
 
-    const updatedHistory = [...chatMessages, userMsg];
+    const updatedHistory = [...chatMessages.slice(0, targetIdx), editedUserMsg];
     setChatMessages(updatedHistory);
-    setInputText('');
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(GLOBAL_CHAT_STORAGE_KEY, JSON.stringify(updatedHistory.slice(-120)));
+      } catch {
+        // Ignore
+      }
+    }
+    setEditingMessageId(null);
+    setEditingMessageText('');
     setIsSendingChat(true);
     setErrorBanner(null);
     setIsLiquidPopoverOpen(false);
@@ -573,7 +874,7 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
     try {
       const { reply, modelUsed } = await runGlobalChat({
         chatHistory: conversationHistory,
-        userMessage: messageToSend,
+        userMessage: trimmedText,
         recentActivitySummary,
         statsSummary,
         currentQuestion,
@@ -585,12 +886,153 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
         },
       });
 
+      const detectedMarkers = extractGraphMarkersFromText(reply);
+      const initialGraphs: Record<string, StriveGeneratedGraph> | undefined =
+        detectedMarkers.length > 0
+          ? Object.fromEntries(
+              detectedMarkers.map((m) => [
+                m.key,
+                {
+                  key: m.key,
+                  title: m.title,
+                  description: m.description,
+                  svg: '',
+                  status: 'loading' as const,
+                },
+              ])
+            )
+          : undefined;
+
       const assistantMsg: GlobalChatMessage = {
         id: `msg_${Date.now()}_a`,
         role: 'assistant',
         content: reply,
         timestamp: Date.now(),
         modelUsed,
+        ...(initialGraphs ? { generatedGraphs: initialGraphs } : {}),
+      };
+
+      setChatMessages((prev) => [...prev, assistantMsg]);
+      setAccumulatedTokens(getAccumulatedTokens());
+      setHighQuota(getHighModelsQuotaState());
+    } catch (err: any) {
+      setChatMessages(previousMessages);
+      const friendly = mapToStudentFriendlyError(
+        err?.message || 'Erro ao conversar com o assistente global.'
+      );
+      setErrorBanner(friendly.displayText);
+      setHighQuota(getHighModelsQuotaState());
+    } finally {
+      setIsSendingChat(false);
+      setRpmStatusNotice(null);
+    }
+  };
+
+  // Handle sending a message in Global Chat
+  const handleSendChatMessage = async (e?: React.FormEvent, customMessage?: string) => {
+    if (e) e.preventDefault();
+    const rawMessage = (customMessage ?? inputText).trim();
+    const attachmentsSnapshot = customMessage ? [] : [...pendingAttachments];
+    if ((!rawMessage && attachmentsSnapshot.length === 0) || isSendingChat) return;
+
+    if (isListeningVoice && recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch {
+        // Ignore
+      }
+      setIsListeningVoice(false);
+    }
+
+    const attachmentMetaSuffix =
+      attachmentsSnapshot.length > 0
+        ? attachmentsSnapshot.map((a) => `[Anexo: ${a.name}]`).join(' ')
+        : '';
+    const displayUserContent = [rawMessage, attachmentMetaSuffix].filter(Boolean).join('\n');
+    const promptForModel =
+      rawMessage || 'Analise o arquivo enviado em relação aos meus estudos.';
+
+    const nowMs = Date.now();
+    const userMsg: GlobalChatMessage = {
+      id: `msg_${nowMs}_u`,
+      role: 'user',
+      content: displayUserContent,
+      timestamp: nowMs,
+    };
+
+    const updatedHistory = [...chatMessages, userMsg];
+    setChatMessages(updatedHistory);
+    setInputText('');
+    if (!customMessage) {
+      setPendingAttachments([]);
+    }
+    setIsSendingChat(true);
+    setErrorBanner(null);
+    setIsLiquidPopoverOpen(false);
+
+    const currentQuota = getHighModelsQuotaState();
+    const boostForThisMessage = currentQuota.enabled && currentQuota.remainingTotal > 0;
+    const initialModelForThisMessage = boostForThisMessage
+      ? HIGH_GEMINI_MODEL_4_HYDROGEN
+      : DEFAULT_GEMINI_MODEL;
+
+    setRpmStatusNotice(`Conectando ao ${initialModelForThisMessage}...`);
+
+    const conversationHistory = updatedHistory.map((msg) => ({
+      role: msg.role,
+      timestamp: msg.timestamp,
+      content: `${formatMessageTimestampPrefix(msg.timestamp, nowMs)} \n${msg.content}`,
+    }));
+
+    const apiAttachments: AIAttachmentPayload[] | undefined =
+      attachmentsSnapshot.length > 0
+        ? attachmentsSnapshot.map((a) => ({
+            mimeType: a.mimeType,
+            data: a.data,
+            name: a.name,
+          }))
+        : undefined;
+
+    try {
+      const { reply, modelUsed } = await runGlobalChat({
+        chatHistory: conversationHistory,
+        userMessage: promptForModel,
+        attachments: apiAttachments,
+        recentActivitySummary,
+        statsSummary,
+        currentQuestion,
+        latestDiagnosis: diagnosis,
+        isBoostActive: boostForThisMessage,
+        onStatusChange: (status) => {
+          setRpmStatusNotice(status);
+          setHighQuota(getHighModelsQuotaState());
+        },
+      });
+
+      const detectedMarkers = extractGraphMarkersFromText(reply);
+      const initialGraphs: Record<string, StriveGeneratedGraph> | undefined =
+        detectedMarkers.length > 0
+          ? Object.fromEntries(
+              detectedMarkers.map((m) => [
+                m.key,
+                {
+                  key: m.key,
+                  title: m.title,
+                  description: m.description,
+                  svg: '',
+                  status: 'loading' as const,
+                },
+              ])
+            )
+          : undefined;
+
+      const assistantMsg: GlobalChatMessage = {
+        id: `msg_${Date.now()}_a`,
+        role: 'assistant',
+        content: reply,
+        timestamp: Date.now(),
+        modelUsed,
+        ...(initialGraphs ? { generatedGraphs: initialGraphs } : {}),
       };
 
       setChatMessages((prev) => [...prev, assistantMsg]);
@@ -598,8 +1040,14 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
       setHighQuota(getHighModelsQuotaState());
     } catch (err: any) {
       setChatMessages(chatMessages);
-      setInputText(messageToSend);
-      setErrorBanner(err?.message || 'Erro ao conversar com o assistente global.');
+      setInputText(rawMessage);
+      if (!customMessage && attachmentsSnapshot.length > 0) {
+        setPendingAttachments(attachmentsSnapshot);
+      }
+      const friendly = mapToStudentFriendlyError(
+        err?.message || 'Erro ao conversar com o assistente global.'
+      );
+      setErrorBanner(friendly.displayText);
       setHighQuota(getHighModelsQuotaState());
     } finally {
       setIsSendingChat(false);
@@ -636,21 +1084,21 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
       return;
     }
 
-    // Request explicit microphone permission first so iframe/browser blocks are caught immediately
+    // Request explicit microphone permission first so browser blocks are caught immediately
     if (typeof navigator !== 'undefined' && navigator.mediaDevices?.getUserMedia) {
       try {
         const mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
         mediaStream.getTracks().forEach((track) => track.stop());
       } catch (permErr: any) {
         const rawErr = String(permErr?.name || permErr?.message || 'not-allowed').toLowerCase();
-        const blockedByIframeOrUser =
+        const blockedByBrowserOrUser =
           rawErr.includes('notallowed') ||
           rawErr.includes('not-allowed') ||
           rawErr.includes('permission') ||
           rawErr.includes('denied') ||
           rawErr.includes('security');
-        const friendlyMsg = blockedByIframeOrUser
-          ? 'Microfone bloqueado pelo iframe do Preview — abra em nova guia ou digite sua mensagem'
+        const friendlyMsg = blockedByBrowserOrUser
+          ? 'Permissão do microfone negada ou bloqueada pelo navegador. Libere o acesso ou digite sua mensagem.'
           : `Falha ao acessar o microfone (${permErr?.name || permErr?.message || 'erro de dispositivo'}). Digite sua mensagem abaixo.`;
         setErrorBanner(friendlyMsg);
         recordOrchestratorRuntimeError(
@@ -685,10 +1133,10 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
           return;
         }
 
-        let errMessage = `Erro no microfone (${errCode}) — abra em nova guia ou digite sua mensagem`;
+        let errMessage = `Erro no microfone (${errCode}) — verifique a permissão ou digite sua mensagem`;
         if (errCode === 'not-allowed' || errCode === 'service-not-allowed') {
           errMessage =
-            'Microfone bloqueado pelo iframe do Preview — abra em nova guia ou digite sua mensagem';
+            'Permissão do microfone negada ou bloqueada pelo navegador. Libere o acesso ou digite sua mensagem.';
         } else if (errCode === 'no-speech') {
           errMessage =
             'Nenhuma fala detectada pelo microfone — verifique a entrada de áudio ou digite sua mensagem';
@@ -715,7 +1163,7 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
       recognition.start();
     } catch (startErr: any) {
       setIsListeningVoice(false);
-      const startMsg = `Não foi possível iniciar o reconhecimento de voz (${startErr?.message || 'Microfone bloqueado pelo iframe do Preview — abra em nova guia ou digite sua mensagem'})`;
+      const startMsg = `Não foi possível iniciar o reconhecimento de voz (${startErr?.message || 'Permissão do microfone negada ou bloqueada pelo navegador. Libere o acesso ou digite sua mensagem.'})`;
       setErrorBanner(startMsg);
       recordOrchestratorRuntimeError(
         `[SpeechRecognition.start Exception] ${startErr?.message || String(startErr)}`,
@@ -724,21 +1172,112 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
     }
   };
 
-  const handleSpeakMessage = (msg: GlobalChatMessage) => {
-    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+  const stopActiveSpeechPlayback = () => {
+    speakingAbortIdRef.current = null;
+    if (activeAudioElementRef.current) {
+      try {
+        activeAudioElementRef.current.pause();
+        activeAudioElementRef.current.currentTime = 0;
+      } catch {
+        // Ignore
+      }
+      activeAudioElementRef.current = null;
+    }
+  };
+
+  const handleSpeakMessage = async (msg: GlobalChatMessage) => {
+    if (typeof window === 'undefined') return;
     if (speakingMessageId === msg.id) {
-      window.speechSynthesis.cancel();
+      stopActiveSpeechPlayback();
       setSpeakingMessageId(null);
       return;
     }
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(msg.content);
-    utterance.lang = 'pt-BR';
-    utterance.rate = 1.05;
-    utterance.onend = () => setSpeakingMessageId(null);
-    utterance.onerror = () => setSpeakingMessageId(null);
+
+    stopActiveSpeechPlayback();
+    speakingAbortIdRef.current = msg.id;
     setSpeakingMessageId(msg.id);
-    window.speechSynthesis.speak(utterance);
+
+    const cleanSpeechText = sanitizeTextForSpeech(msg.content);
+    if (!cleanSpeechText) {
+      speakingAbortIdRef.current = null;
+      setSpeakingMessageId(null);
+      return;
+    }
+
+    const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
+    let cachedAudio = spokenAudioCacheRef.current.get(msg.id);
+
+    if (!cachedAudio) {
+      if (!isOnline) {
+        speakingAbortIdRef.current = null;
+        setSpeakingMessageId(null);
+        const offlineErr = 'Sem conexão com a internet para sintetizar a voz via Gemini Live API.';
+        const friendly = mapToStudentFriendlyError(offlineErr);
+        setErrorBanner(friendly.displayText);
+        return;
+      }
+
+      const res = await notifyQuatNativeAudioDialog({
+        action: 'speak',
+        textToSpeak: cleanSpeechText,
+      });
+
+      if (speakingAbortIdRef.current !== msg.id) return;
+
+      if (res.error || !res.audioBase64) {
+        speakingAbortIdRef.current = null;
+        setSpeakingMessageId(null);
+        const realErr =
+          res.error || 'Falha ao gerar áudio na Gemini Live API (nenhum dado de áudio retornado).';
+        const friendly = mapToStudentFriendlyError(
+          `${realErr}${res.attempts ? ` | attempts=${JSON.stringify(res.attempts)}` : ''}`
+        );
+        setErrorBanner(friendly.displayText);
+        return;
+      }
+
+      cachedAudio = {
+        audioBase64: res.audioBase64,
+        mimeType: res.mimeType || 'audio/wav',
+      };
+      spokenAudioCacheRef.current.set(msg.id, cachedAudio);
+    }
+
+    if (speakingAbortIdRef.current !== msg.id) return;
+
+    try {
+      const audio = new Audio(
+        `data:${cachedAudio.mimeType || 'audio/wav'};base64,${cachedAudio.audioBase64}`
+      );
+      activeAudioElementRef.current = audio;
+      audio.onended = () => {
+        if (speakingAbortIdRef.current === msg.id) {
+          speakingAbortIdRef.current = null;
+          activeAudioElementRef.current = null;
+          setSpeakingMessageId(null);
+        }
+      };
+      audio.onerror = () => {
+        if (speakingAbortIdRef.current === msg.id) {
+          speakingAbortIdRef.current = null;
+          activeAudioElementRef.current = null;
+          setSpeakingMessageId(null);
+          const mediaErr = 'Erro ao reproduzir o fluxo de áudio retornado pela Gemini Live API.';
+          const friendly = mapToStudentFriendlyError(mediaErr);
+          setErrorBanner(friendly.displayText);
+        }
+      };
+      await audio.play();
+    } catch (playErr: any) {
+      speakingAbortIdRef.current = null;
+      activeAudioElementRef.current = null;
+      setSpeakingMessageId(null);
+      const errMsg = `Não foi possível reproduzir o áudio da Live API: ${
+        playErr?.message || String(playErr)
+      }`;
+      const friendly = mapToStudentFriendlyError(errMsg);
+      setErrorBanner(friendly.displayText);
+    }
   };
 
   // Reused DraggableModeSwitcher tabs (Zero duplicate tab-switcher code)
@@ -805,9 +1344,6 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
               webSpeechRecognitionSupported: Boolean(
                 (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
               ),
-              speechSynthesisSupported: 'speechSynthesis' in window,
-              speechSynthesisVoicesCount:
-                'speechSynthesis' in window ? window.speechSynthesis.getVoices().length : 0,
             }
           : {},
       orchestrator: orch,
@@ -900,10 +1436,10 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
                         onOpenBYOKModal();
                       }}
                       className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-surface hover:bg-surface-hover text-secondary hover:text-primary border border-border text-xs font-medium transition-colors cursor-pointer"
-                      title="Configurar Chaves de API (Gemini & Groq) e Ver Tutoriais"
+                      aria-label="Chaves de acesso gratuitas (Google e Groq)"
                     >
                       <KeyRound className="w-3.5 h-3.5 text-accent" />
-                      <span className="hidden sm:inline">Chaves API</span>
+                      <span className="hidden sm:inline">Chaves de Acesso</span>
                     </button>
 
                     <button
@@ -923,7 +1459,6 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
                     currentMode={activeTab}
                     onSelectMode={(mode) => setActiveTab(mode as 'chat' | 'diagnosis' | 'improve')}
                     tabs={switcherTabs}
-                    title="Clique diretamente ou arraste para alternar entre Modo Strive, Diagnóstico e Melhore meu Aprendizado"
                   />
                 </div>
               </div>
@@ -941,6 +1476,7 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
                     type="button"
                     onClick={() => setErrorBanner(null)}
                     className="p-1 hover:opacity-75 cursor-pointer"
+                    aria-label="Fechar aviso"
                   >
                     <X className="w-3.5 h-3.5" />
                   </button>
@@ -950,7 +1486,22 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
 
             {/* TAB 1: MODO STRIVE (ÁREA MÁXIMA DEDICADA AO CHAT GERAL COM ALINHAMENTO EXATO) */}
             {activeTab === 'chat' && (
-              <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+              <div
+                onDragEnter={handleChatDragEnter}
+                onDragOver={handleChatDragOver}
+                onDragLeave={handleChatDragLeave}
+                onDrop={handleChatDrop}
+                className="relative flex-1 flex flex-col min-h-0 overflow-hidden"
+              >
+                {isDraggingFiles && (
+                  <div className="absolute inset-3 z-40 rounded-2xl bg-surface/90 border-2 border-dashed border-accent text-primary flex flex-col items-center justify-center gap-2 pointer-events-none select-none shadow-sm">
+                    <Paperclip className="w-6 h-6 text-accent" />
+                    <span className="text-xs sm:text-sm font-semibold text-primary">
+                      Solte a imagem ou arquivo aqui para anexar
+                    </span>
+                  </div>
+                )}
+
                 <div
                   ref={chatScrollContainerRef}
                   className="flex-1 overflow-y-auto"
@@ -993,62 +1544,140 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
                         </div>
                       </div>
                     ) : (
-                      displayedChatMessages.map((msg) => (
-                        <div
-                          key={msg.id}
-                          data-chat-msg-item="true"
-                          className={`flex flex-col w-full ${
-                            msg.role === 'user' ? 'items-end' : 'items-start'
-                          }`}
-                        >
+                      displayedChatMessages.map((msg) => {
+                        const isEditingThisMessage =
+                          msg.role === 'user' && editingMessageId === msg.id;
+
+                        return (
                           <div
-                            className={`rounded-2xl p-4 sm:p-5 text-xs sm:text-sm leading-relaxed space-y-2 shadow-xs ${
-                              msg.role === 'user'
-                                ? 'w-fit max-w-[calc(100%-6rem)] sm:max-w-[calc(100%-7rem)] bg-accent text-accent-contrast rounded-br-xs'
-                                : 'w-[calc(100%-6rem)] sm:w-[calc(100%-7rem)] bg-surface text-primary border border-border rounded-bl-xs'
+                            key={msg.id}
+                            data-chat-msg-item="true"
+                            className={`flex flex-col w-full ${
+                              msg.role === 'user' ? 'items-end' : 'items-start'
                             }`}
                           >
-                            {msg.role === 'user' ? (
-                              <div className="whitespace-pre-wrap select-text">{msg.content}</div>
-                            ) : (
-                              <MarkdownRenderer content={msg.content} />
-                            )}
                             <div
-                              className={`flex items-center justify-between gap-3 pt-1.5 text-[10px] ${
-                                msg.role === 'user' ? 'opacity-80' : 'text-muted'
+                              className={`group rounded-2xl p-4 sm:p-5 text-xs sm:text-sm leading-relaxed space-y-2 shadow-xs ${
+                                msg.role === 'user'
+                                  ? `${
+                                      isEditingThisMessage ? 'w-full' : 'w-fit'
+                                    } max-w-[calc(100%-6rem)] sm:max-w-[calc(100%-7rem)] bg-accent text-accent-contrast rounded-br-xs`
+                                  : 'w-[calc(100%-6rem)] sm:w-[calc(100%-7rem)] bg-surface text-primary border border-border rounded-bl-xs'
                               }`}
                             >
-                              <div className="flex items-center gap-1.5 flex-wrap">
-                                <span>{formatChatBubbleTimestamp(msg.timestamp)}</span>
-                                {msg.modelUsed && (
-                                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-surface border border-border text-muted font-mono">
-                                    {msg.modelUsed}
-                                  </span>
-                                )}
-                              </div>
-                              {msg.role === 'assistant' && (
-                                <button
-                                  type="button"
-                                  onClick={() => handleSpeakMessage(msg)}
-                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-surface hover:bg-surface-hover text-secondary border border-border cursor-pointer shrink-0"
-                                >
-                                  {speakingMessageId === msg.id ? (
-                                    <>
-                                      <Square className="w-2.5 h-2.5 fill-current text-danger" />
-                                      <span>Parar</span>
-                                    </>
-                                  ) : (
-                                    <>
-                                      <Volume2 className="w-2.5 h-2.5 text-accent" />
-                                      <span>Ouvir</span>
-                                    </>
-                                  )}
-                                </button>
+                              {msg.role === 'user' ? (
+                                isEditingThisMessage ? (
+                                  <div className="space-y-2.5">
+                                    <textarea
+                                      value={editingMessageText}
+                                      onChange={(e) => setEditingMessageText(e.target.value)}
+                                      onKeyDown={(e) => {
+                                        if (e.key === 'Escape') {
+                                          e.preventDefault();
+                                          e.stopPropagation();
+                                          handleCancelEditMessage();
+                                        } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                                          e.preventDefault();
+                                          e.stopPropagation();
+                                          handleSaveEditedMessage(msg.id);
+                                        }
+                                      }}
+                                      rows={3}
+                                      autoFocus
+                                      aria-label="Editar mensagem"
+                                      className="w-full p-2.5 rounded-xl bg-surface text-primary border border-border text-xs sm:text-sm leading-relaxed focus:outline-none focus:border-accent resize-y"
+                                    />
+                                    <div className="flex items-center justify-end gap-2">
+                                      <button
+                                        type="button"
+                                        onClick={handleCancelEditMessage}
+                                        className="px-2.5 py-1 rounded-lg bg-surface hover:bg-surface-hover text-secondary hover:text-primary border border-border text-xs font-medium transition-colors cursor-pointer"
+                                      >
+                                        Cancelar
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleSaveEditedMessage(msg.id)}
+                                        disabled={isSendingChat || !editingMessageText.trim()}
+                                        className="px-3 py-1 rounded-lg bg-surface-elevated hover:bg-surface-hover text-primary border border-border text-xs font-semibold transition-colors cursor-pointer disabled:opacity-40"
+                                      >
+                                        Salvar e reenviar
+                                      </button>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <div className="whitespace-pre-wrap select-text">
+                                    {msg.content}
+                                  </div>
+                                )
+                              ) : (
+                                <MarkdownRenderer
+                                  content={msg.content}
+                                  graphsByKey={msg.generatedGraphs}
+                                />
                               )}
+                              <div
+                                className={`flex items-center justify-between gap-3 pt-1.5 text-[10px] ${
+                                  msg.role === 'user' ? 'opacity-80' : 'text-muted'
+                                }`}
+                              >
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  <span>{formatChatBubbleTimestamp(msg.timestamp)}</span>
+                                  {msg.modelUsed && (
+                                    <span className="text-[9px] px-1.5 py-0.5 rounded bg-surface border border-border text-muted font-mono">
+                                      {msg.modelUsed}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="flex items-center gap-1 shrink-0">
+                                  {msg.role === 'user' && !isEditingThisMessage && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleStartEditMessage(msg)}
+                                      disabled={isSendingChat}
+                                      aria-label="Editar mensagem"
+                                      className="inline-flex items-center justify-center p-1 rounded hover:bg-surface/20 text-accent-contrast group-hover:opacity-100 opacity-70 sm:opacity-0 focus:opacity-100 transition-opacity cursor-pointer disabled:opacity-40"
+                                    >
+                                      <Pencil className="w-3 h-3" />
+                                    </button>
+                                  )}
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteMessage(msg.id)}
+                                    aria-label="Excluir mensagem"
+                                    className={`inline-flex items-center justify-center p-1 rounded group-hover:opacity-100 opacity-70 sm:opacity-0 focus:opacity-100 transition-opacity cursor-pointer ${
+                                      msg.role === 'user'
+                                        ? 'hover:bg-surface/20 text-accent-contrast'
+                                        : 'hover:bg-surface-hover text-muted hover:text-danger'
+                                    }`}
+                                  >
+                                    <Trash2 className="w-3 h-3" />
+                                  </button>
+                                  {msg.role === 'assistant' && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleSpeakMessage(msg)}
+                                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-surface hover:bg-surface-hover text-secondary border border-border cursor-pointer shrink-0"
+                                    >
+                                      {speakingMessageId === msg.id ? (
+                                        <>
+                                          <Square className="w-2.5 h-2.5 fill-current text-danger" />
+                                          <span>Parar</span>
+                                        </>
+                                      ) : (
+                                        <>
+                                          <Volume2 className="w-2.5 h-2.5 text-accent" />
+                                          <span>Ouvir</span>
+                                        </>
+                                      )}
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
                             </div>
                           </div>
-                        </div>
-                      ))
+                        );
+                      })
                     )}
 
                     {/* Live Loading Bubble with Mandatory Active Model Name */}
@@ -1140,8 +1769,8 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
                               <div className="space-y-1.5">
                                 <p className="text-xs font-bold text-primary leading-snug">
                                   {isQuotaExhausted
-                                    ? 'Limite diário dos modelos maiores esgotado'
-                                    : 'Você tem limites dos modelos maiores!'}
+                                    ? 'Limite diário dos modelos avançados esgotado'
+                                    : 'Limite diário dos modelos avançados'}
                                 </p>
                                 <div className="flex items-center justify-between gap-1">
                                   <span className="text-[11px] text-secondary">Saldo diário:</span>
@@ -1160,18 +1789,13 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
                                     Modo Boost
                                   </div>
                                   <div className="text-[10px] text-muted truncate">
-                                    {isQuotaExhausted ? 'Bloqueado (0/40)' : 'Modelos maiores'}
+                                    {isQuotaExhausted ? 'Bloqueado hoje (0/40)' : 'Modelos avançados'}
                                   </div>
                                 </div>
                                 <LiveSwitch
                                   checked={isHighModelEffective}
                                   onChange={handleToggleHighModels}
                                   disabled={isQuotaExhausted}
-                                  title={
-                                    isQuotaExhausted
-                                      ? 'Limite diário dos modelos maiores esgotado (0/40)'
-                                      : 'Ativar ou desativar Modo Boost (3.8 Flash / 3.6 Flash)'
-                                  }
                                   ariaLabel="Alternar Modo Boost"
                                 />
                               </div>
@@ -1195,6 +1819,39 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
                         </div>
                       )}
 
+                      {/* Compact Preview Chips for Pending Image/Audio Attachments */}
+                      {pendingAttachments.length > 0 && (
+                        <div className="pt-2.5 pb-0.5 flex flex-wrap items-center gap-2">
+                          {pendingAttachments.map((att) => (
+                            <div
+                              key={att.id}
+                              className="inline-flex items-center gap-2 pl-2 pr-1.5 py-1 rounded-xl bg-surface-subtle border border-border text-xs text-primary max-w-[220px]"
+                            >
+                              {att.previewUrl ? (
+                                <img
+                                  src={att.previewUrl}
+                                  alt={att.name}
+                                  className="w-6 h-6 rounded object-cover border border-border shrink-0"
+                                />
+                              ) : (
+                                <Volume2 className="w-3.5 h-3.5 text-accent shrink-0" />
+                              )}
+                              <span className="truncate text-[11px] font-medium text-secondary">
+                                {att.name}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveAttachment(att.id)}
+                                className="p-0.5 rounded hover:bg-surface-hover text-muted hover:text-primary transition-colors cursor-pointer shrink-0"
+                                aria-label={`Remover ${att.name}`}
+                              >
+                                <X className="w-3 h-3" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
                       {/* Chat Input Bar Aligned with Message Bubbles:
                           - Left edge of Mic button === Left edge of AI bubble
                           - Right edge of Input === Right edge of AI bubble (calc(100% - 6rem) / sm:calc(100% - 7rem))
@@ -1204,6 +1861,15 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
                         onSubmit={(e) => handleSendChatMessage(e)}
                         className="py-3 flex items-center gap-2 w-full"
                       >
+                        <input
+                          ref={fileInputRef}
+                          type="file"
+                          accept="image/*,audio/*"
+                          multiple
+                          className="hidden"
+                          onChange={handleSelectAttachments}
+                        />
+
                         <button
                           type="button"
                           onClick={handleToggleVoiceInput}
@@ -1212,13 +1878,24 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
                               ? 'bg-danger text-danger-contrast border-transparent animate-pulse'
                               : 'bg-surface hover:bg-surface-hover text-secondary border-border'
                           }`}
-                          title={isListeningVoice ? 'Parar ditado por voz' : 'Falar no Chat Geral'}
+                          aria-label={
+                            isListeningVoice ? 'Parar ditado por voz' : 'Falar no Chat Geral'
+                          }
                         >
                           {isListeningVoice ? (
                             <MicOff className="w-4 h-4" />
                           ) : (
                             <Mic className="w-4 h-4" />
                           )}
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => fileInputRef.current?.click()}
+                          className="w-10 h-10 rounded-xl border border-border bg-surface hover:bg-surface-hover text-secondary hover:text-primary transition-colors cursor-pointer shrink-0 flex items-center justify-center"
+                          aria-label="Anexar imagem ou arquivo de áudio"
+                        >
+                          <Paperclip className="w-4 h-4" />
                         </button>
 
                         {/* Compact Square <ChevronsUp /> Button with Fluid Fill & Popover */}
@@ -1232,12 +1909,7 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
                                 ? 'border-accent text-accent shadow-2xs bg-surface'
                                 : 'bg-surface hover:bg-surface-hover text-secondary border-border'
                             }`}
-                            title={
-                              isQuotaExhausted
-                                ? 'Limite diário dos modelos maiores esgotado (0/40)'
-                                : `Modelos maiores (${highQuota.remainingTotal}/40 restantes)`
-                            }
-                            aria-label="Limites dos modelos maiores"
+                            aria-label="Limite diário dos modelos avançados"
                           >
                             <div
                               className={`absolute bottom-0 inset-x-0 transition-all duration-500 ease-out pointer-events-none ${
@@ -1266,17 +1938,28 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
                           </button>
                         </div>
 
-                        <input
-                          type="text"
+                        <textarea
+                          ref={chatInputRef}
+                          rows={1}
                           value={inputText}
                           onChange={(e) => setInputText(e.target.value)}
+                          onPaste={handlePasteAttachment}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' && !e.shiftKey) {
+                              e.preventDefault();
+                              handleSendChatMessage();
+                            }
+                          }}
                           placeholder="Tire dúvidas sobre suas questões ou peça um plano de estudo..."
-                          className="flex-1 min-w-0 h-10 px-3.5 text-xs sm:text-sm rounded-xl theme-input bg-surface border border-border text-primary placeholder:text-muted focus:outline-none focus:border-accent"
+                          className="flex-1 min-w-0 h-10 px-3.5 py-2.5 text-xs sm:text-sm rounded-xl theme-input bg-surface border border-border text-primary placeholder:text-muted focus:outline-none focus:border-accent resize-none leading-tight overflow-y-auto"
                         />
 
                         <button
                           type="submit"
-                          disabled={isSendingChat || !inputText.trim()}
+                          disabled={
+                            isSendingChat ||
+                            (!inputText.trim() && pendingAttachments.length === 0)
+                          }
                           className="w-[5.5rem] sm:w-[6.5rem] h-10 inline-flex items-center justify-center gap-1.5 rounded-xl theme-btn-accent text-xs font-semibold transition-all cursor-pointer disabled:opacity-40 shrink-0"
                         >
                           {isSendingChat ? (
@@ -1430,7 +2113,7 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
                           <TrendingUp className="w-4 h-4 text-accent" />
                           <span>Melhore meu Aprendizado</span>
                           <span className="text-xs font-mono text-muted">
-                            ({accumulatedTokens}/{LEARNING_IMPROVEMENT_TOKEN_GOAL} tokens)
+                            ({tokenProgressPercent}% concluído)
                           </span>
                         </div>
                         {canHighlightLearningImprovement ? (
@@ -1634,10 +2317,66 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
               </div>
             )}
 
-            {/* 3. Histórico Detalhado de Requisições da Sessão */}
+            {/* 3. Linha do Tempo Universal Automática da Sessão (sessionUniversalLogs) */}
             <div className="p-3 rounded-lg bg-surface border border-border space-y-2">
               <div className="font-bold text-accent border-b border-border pb-1">
-                3. LOGS DE REQUISIÇÕES DE IA NA SESSÃO ({debugSnapshot.orchestrator.requestLogs.length})
+                3. LOG UNIVERSAL AUTOMÁTICO DA SESSÃO — REDE, IA, CONSOLE &amp; EXCEÇÕES (
+                {debugSnapshot.orchestrator.sessionUniversalLogs.length})
+              </div>
+              {debugSnapshot.orchestrator.sessionUniversalLogs.length === 0 ? (
+                <div className="text-muted">Nenhum evento registrado nesta sessão ainda.</div>
+              ) : (
+                <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
+                  {debugSnapshot.orchestrator.sessionUniversalLogs.map((uLog) => (
+                    <div
+                      key={uLog.id}
+                      className="p-2.5 rounded bg-surface-subtle border border-border space-y-1"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2 font-bold">
+                        <span>
+                          [{uLog.isoTime}] [{uLog.category.toUpperCase()}] {uLog.source}
+                          {uLog.model ? ` | model=${uLog.model}` : ''}
+                          {uLog.url ? ` | url=${uLog.url}` : ''}
+                        </span>
+                        <span
+                          className={
+                            uLog.level === 'error'
+                              ? 'text-danger'
+                              : uLog.level === 'warn'
+                              ? 'text-accent'
+                              : 'text-success'
+                          }
+                        >
+                          {uLog.level.toUpperCase()}
+                          {typeof uLog.durationMs === 'number' ? ` (${uLog.durationMs}ms` : ''}
+                          {typeof uLog.status === 'number'
+                            ? `${typeof uLog.durationMs === 'number' ? ', ' : ' ('}HTTP ${uLog.status})`
+                            : typeof uLog.durationMs === 'number'
+                            ? ')'
+                            : ''}
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-primary break-words">{uLog.message}</div>
+                      {uLog.attempts && uLog.attempts.length > 0 && (
+                        <pre className="text-[10px] text-secondary whitespace-pre-wrap break-words bg-surface p-1.5 rounded border border-border">
+                          Attempts: {JSON.stringify(uLog.attempts, null, 2)}
+                        </pre>
+                      )}
+                      {uLog.error && (
+                        <pre className="text-[11px] text-danger whitespace-pre-wrap break-words">
+                          Erro Completo: {uLog.error}
+                        </pre>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* 4. Histórico Detalhado de Requisições de IA da Sessão */}
+            <div className="p-3 rounded-lg bg-surface border border-border space-y-2">
+              <div className="font-bold text-accent border-b border-border pb-1">
+                4. LOGS DE FLUXOS DE IA NA SESSÃO ({debugSnapshot.orchestrator.requestLogs.length})
               </div>
               {debugSnapshot.orchestrator.requestLogs.length === 0 ? (
                 <div className="text-muted">Nenhuma requisição disparada nesta sessão ainda.</div>
@@ -1693,10 +2432,10 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
               )}
             </div>
 
-            {/* 4. Dump Completo de Estado em JSON */}
+            {/* 5. Dump Completo de Estado em JSON */}
             <div className="p-3 rounded-lg bg-surface border border-border space-y-2">
               <div className="font-bold text-accent border-b border-border pb-1">
-                4. DUMP COMPLETO DO ESTADO DA SESSÃO (JSON)
+                5. DUMP COMPLETO DO ESTADO DA SESSÃO (JSON)
               </div>
               <pre className="text-[10px] text-secondary whitespace-pre-wrap break-words max-h-96 overflow-y-auto p-2 rounded bg-surface-subtle border border-border">
                 {JSON.stringify(debugSnapshot, null, 2)}

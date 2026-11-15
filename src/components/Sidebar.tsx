@@ -227,7 +227,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <div className="space-y-3">
             <div className="flex items-center justify-between px-2">
               <span className="text-[11px] font-semibold tracking-wider text-muted uppercase">
-                Busca & Filtros
+                Busca e Filtros
               </span>
               {hasActiveFilters && (
                 <button
@@ -590,7 +590,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             type="button"
             onClick={onOpenXPPerformance}
             className="relative w-full h-9 rounded-xl overflow-hidden border border-border/80 flex items-center px-3 justify-between text-xs select-none shadow-xs xp-track cursor-pointer hover:opacity-95 active:scale-[0.99] transition-all"
-            title={`Clique para abrir seu Painel de Desempenho & Metas | Ofensiva: ${stats.streak_days} dias | Meta: ${currentTodayXP}/${effectiveGoal} XP (${xpProgress}%)`}
+            title={`Clique para abrir seu Painel de Desempenho e Metas | Ofensiva: ${stats.streak_days} dias | Meta: ${currentTodayXP}/${effectiveGoal} XP (${xpProgress}%)`}
           >
             {/* Progress Fill Underlay - Proportional with clean edge fill */}
             {xpProgress > 0 && (

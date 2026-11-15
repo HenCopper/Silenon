@@ -5,31 +5,34 @@ import {
   ShieldCheck, 
   Check, 
   Download, 
-  Upload, 
   Target, 
   HardDrive, 
-  Award, 
   Flame, 
   Plus, 
   RefreshCw, 
   Trash2,
   Lock,
-  Sparkles,
-  Info,
   AlertCircle,
-  Cloud,
-  Loader2
+  Loader2,
+  ArrowLeftRight,
+  Pencil
 } from 'lucide-react';
-import { UserAccount, UserStatistics, SRSItem, UserBookmark } from '../types/question';
+import { UserAccount, UserStatistics, SRSItem, UserBookmark, QuestionDatabase } from '../types/question';
 import { LocalStorageManager } from '../lib/storage';
 import { checkStorageMetrics, requestPersistentStorage, StorageMetricsInfo } from '../lib/storageMetrics';
 import { ConfirmModal } from './ConfirmModal';
+import { HorizontalTabCarousel, HorizontalTabItem } from './ui/HorizontalTabCarousel';
+import { hasAnyAIKey } from '../lib/aiOrchestrator';
 import { 
   auth,
   signInWithGoogleReal,
   signOutReal,
   syncUserDataToFirestore,
   loadUserDataFromFirestore,
+  syncDatabasesToFirestore,
+  loadDatabasesFromFirestore,
+  mergeCloudDatabasesWithLocal,
+  loadEncryptedKeysFromFirestore,
   getFriendlyAuthErrorMessage
 } from '../lib/firebase';
 
@@ -40,9 +43,15 @@ interface UserAccountModalProps {
   onUpdateAccount: (updated: UserAccount) => void;
   stats: UserStatistics;
   onNavigateToMetrics?: () => void;
+  onDatabasesUpdated?: (databases: QuestionDatabase[]) => void;
+  onOpenBYOKModal?: () => void;
+  onProfileChanged?: () => void;
 }
 
 const AVATAR_OPTIONS = ['🎯', '⚖️', '👮', '💼', '🩺', '📚', '🚀', '🦁', '🦉', '⚡'];
+
+type UserAccountTabId = 'profile' | 'storage' | 'profiles';
+const ACCOUNT_TAB_IDS: UserAccountTabId[] = ['profile', 'storage', 'profiles'];
 
 export const UserAccountModal: React.FC<UserAccountModalProps> = ({
   isOpen,
@@ -51,17 +60,11 @@ export const UserAccountModal: React.FC<UserAccountModalProps> = ({
   onUpdateAccount,
   stats,
   onNavigateToMetrics,
+  onDatabasesUpdated,
+  onOpenBYOKModal,
+  onProfileChanged,
 }) => {
-  const [activeTab, setActiveTab] = useState<'profile' | 'storage' | 'profiles'>('profile');
-  const [name, setName] = useState(account.name);
-  const [email, setEmail] = useState(account.email || '');
-  const [avatar, setAvatar] = useState(account.avatar);
-  const [targetExam, setTargetExam] = useState(account.targetExam);
-  const [targetRole, setTargetRole] = useState(account.targetRole || '');
-  const [dailyGoalQuestions, setDailyGoalQuestions] = useState(account.dailyGoalQuestions);
-  const [experienceLevel, setExperienceLevel] = useState(account.experienceLevel);
-  const [isSavedNotice, setIsSavedNotice] = useState(false);
-  const [formErrors, setFormErrors] = useState<{ name?: string; email?: string }>({});
+  const [activeTab, setActiveTab] = useState<UserAccountTabId>('profile');
   const [isGoogleLoading, setIsGoogleLoading] = useState(false);
   const [isSyncingCloud, setIsSyncingCloud] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
@@ -72,23 +75,26 @@ export const UserAccountModal: React.FC<UserAccountModalProps> = ({
   const [isPersisting, setIsPersisting] = useState(false);
   const [persistSuccessMsg, setPersistSuccessMsg] = useState<string | null>(null);
 
-  // Multi-profile state
+  // Multi-profile & inline accordion edit state
   const [profiles, setProfiles] = useState<UserAccount[]>([]);
   const [newProfileName, setNewProfileName] = useState('');
   const [isCreatingProfile, setIsCreatingProfile] = useState(false);
   const [profileToDelete, setProfileToDelete] = useState<string | null>(null);
+  const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
+  const [editName, setEditName] = useState('');
+  const [editEmail, setEditEmail] = useState('');
+  const [editAvatar, setEditAvatar] = useState('🎯');
+  const [editTargetExam, setEditTargetExam] = useState('');
+  const [editTargetRole, setEditTargetRole] = useState('');
+  const [editDailyGoalQuestions, setEditDailyGoalQuestions] = useState(30);
+  const [editExperienceLevel, setEditExperienceLevel] = useState<UserAccount['experienceLevel']>('intermediario');
+  const [editErrors, setEditErrors] = useState<{ name?: string; email?: string }>({});
 
   useEffect(() => {
     if (isOpen) {
-      setName(account.name);
-      setEmail(account.email || '');
-      setAvatar(account.avatar);
-      setTargetExam(account.targetExam);
-      setTargetRole(account.targetRole || '');
-      setDailyGoalQuestions(account.dailyGoalQuestions);
-      setExperienceLevel(account.experienceLevel);
       setProfiles(LocalStorageManager.getUserProfiles());
-      setFormErrors({});
+      setEditingProfileId(null);
+      setEditErrors({});
       setAuthError(null);
       setSyncSuccessNotice(null);
 
@@ -100,12 +106,36 @@ export const UserAccountModal: React.FC<UserAccountModalProps> = ({
 
   if (!isOpen) return null;
 
-  const handleSaveProfile = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
+  const populateEditFields = (target: UserAccount) => {
+    setEditName(target.name);
+    setEditEmail(target.email || '');
+    setEditAvatar(target.avatar);
+    setEditTargetExam(target.targetExam || '');
+    setEditTargetRole(target.targetRole || '');
+    setEditDailyGoalQuestions(target.dailyGoalQuestions);
+    setEditExperienceLevel(target.experienceLevel);
+    setEditErrors({});
+  };
 
+  const handleToggleEditAccordion = (prof: UserAccount) => {
+    if (editingProfileId === prof.id) {
+      setEditingProfileId(null);
+      setEditErrors({});
+    } else {
+      populateEditFields(prof);
+      setEditingProfileId(prof.id);
+    }
+  };
+
+  const handleDiscardEdit = (prof: UserAccount) => {
+    populateEditFields(prof);
+    setEditingProfileId(null);
+  };
+
+  const handleSaveEditedAccount = (prof: UserAccount) => {
     const newErrors: { name?: string; email?: string } = {};
-    const trimmedName = name.trim();
-    const trimmedEmail = email.trim();
+    const trimmedName = editName.trim();
+    const trimmedEmail = editEmail.trim();
 
     if (!trimmedName) {
       newErrors.name = 'Por favor, informe seu nome ou identificação.';
@@ -116,38 +146,43 @@ export const UserAccountModal: React.FC<UserAccountModalProps> = ({
     }
 
     if (Object.keys(newErrors).length > 0) {
-      setFormErrors(newErrors);
+      setEditErrors(newErrors);
       return;
     }
 
-    setFormErrors({});
+    setEditErrors({});
 
-    const updated: UserAccount = {
-      ...account,
+    const updatedProfile: UserAccount = {
+      ...prof,
       name: trimmedName || 'Estudante',
       email: trimmedEmail,
-      avatar,
-      targetExam: targetExam.trim(),
-      targetRole: targetRole.trim(),
-      dailyGoalQuestions,
-      experienceLevel,
+      avatar: editAvatar,
+      targetExam: editTargetExam.trim(),
+      targetRole: editTargetRole.trim(),
+      dailyGoalQuestions: editDailyGoalQuestions,
+      experienceLevel: editExperienceLevel,
     };
-    const saved = LocalStorageManager.saveUserAccount(updated);
-    onUpdateAccount(saved);
-    setProfiles(LocalStorageManager.getUserProfiles());
-    setIsSavedNotice(true);
-    setTimeout(() => setIsSavedNotice(false), 2500);
 
-    // If cloud sync is active, update Firestore
-    if (saved.provider === 'google' && auth.currentUser) {
-      syncUserDataToFirestore(auth.currentUser, saved, {
-        stats: LocalStorageManager.getStatistics(),
-        srsItems: LocalStorageManager.getSRSItems(),
-        answers: LocalStorageManager.getAnswers(),
-        bookmarks: LocalStorageManager.getBookmarks(),
-      }).catch((err) => {
-        console.warn('Silent Firestore sync error on save profile:', err);
-      });
+    const { savedAccount, profiles: updatedProfiles, isActiveProfile } =
+      LocalStorageManager.updateUserProfile(updatedProfile);
+
+    setProfiles(updatedProfiles);
+    setEditingProfileId(null);
+
+    if (isActiveProfile) {
+      onUpdateAccount(savedAccount);
+
+      // If cloud sync is active on this active account, update Firestore
+      if (savedAccount.provider === 'google' && auth.currentUser) {
+        syncUserDataToFirestore(auth.currentUser, savedAccount, {
+          stats: LocalStorageManager.getStatistics(),
+          srsItems: LocalStorageManager.getSRSItems(),
+          answers: LocalStorageManager.getAnswers(),
+          bookmarks: LocalStorageManager.getBookmarks(),
+        }).catch((err) => {
+          console.warn('Silent Firestore sync error on save profile:', err);
+        });
+      }
     }
   };
 
@@ -188,6 +223,14 @@ export const UserAccountModal: React.FC<UserAccountModalProps> = ({
         lastLoginAt: new Date().toISOString(),
       };
 
+      // Preserve local profile progress when upgrading a local profile to Google
+      if (account.provider !== 'google' && account.id !== user.uid) {
+        LocalStorageManager.copyProfileProgressIfEmpty(account.id, user.uid);
+      }
+
+      // Save active Google account first so subsequent writes target user.uid's scoped keys
+      const saved = LocalStorageManager.saveUserAccount(updated);
+
       // If cloud progress exists (e.g. from previous device), restore stats & study progress
       if (cloudData) {
         if (cloudData.stats) {
@@ -210,15 +253,11 @@ export const UserAccountModal: React.FC<UserAccountModalProps> = ({
         }
       }
 
-      // Save locally
-      const saved = LocalStorageManager.saveUserAccount(updated);
       onUpdateAccount(saved);
-      setName(saved.name);
-      setEmail(saved.email || '');
-      setAvatar(saved.avatar);
       setProfiles(LocalStorageManager.getUserProfiles());
+      onProfileChanged?.();
 
-      // Perform immediate real synchronization to Firestore
+      // Perform immediate real synchronization of profile & progress to Firestore
       const syncResult = await syncUserDataToFirestore(user, saved, {
         stats: LocalStorageManager.getStatistics(),
         srsItems: LocalStorageManager.getSRSItems(),
@@ -226,8 +265,36 @@ export const UserAccountModal: React.FC<UserAccountModalProps> = ({
         bookmarks: LocalStorageManager.getBookmarks(),
       });
 
+      // Load, merge, and sync Question Databases with Firestore
+      try {
+        const cloudDbs = await loadDatabasesFromFirestore(user.uid);
+        const localDbs = LocalStorageManager.getDatabases();
+        const mergedDbs = mergeCloudDatabasesWithLocal(localDbs, cloudDbs);
+        LocalStorageManager.saveDatabases(mergedDbs);
+        if (onDatabasesUpdated) {
+          onDatabasesUpdated(mergedDbs);
+        }
+        await syncDatabasesToFirestore(user.uid, mergedDbs);
+      } catch (dbSyncErr) {
+        console.warn('Could not sync question databases on Google connect:', dbSyncErr);
+      }
+
+      // If no local AI keys exist, check if user has an encrypted vault in Firestore
+      if (!hasAnyAIKey() && onOpenBYOKModal) {
+        try {
+          const vault = await loadEncryptedKeysFromFirestore(user.uid);
+          if (vault) {
+            onClose();
+            onOpenBYOKModal();
+            return;
+          }
+        } catch {
+          // Ignore vault check error
+        }
+      }
+
       const syncTime = new Date(syncResult.lastSyncedAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-      setSyncSuccessNotice(`Conta Google conectada com sucesso! Dados sincronizados no Firestore às ${syncTime}.`);
+      setSyncSuccessNotice(`Conta Google conectada com sucesso! Bancos e progresso sincronizados às ${syncTime}.`);
       setTimeout(() => setSyncSuccessNotice(null), 4000);
     } catch (err: unknown) {
       console.error('Google Sign-In Error:', err);
@@ -277,12 +344,22 @@ export const UserAccountModal: React.FC<UserAccountModalProps> = ({
         answers: LocalStorageManager.getAnswers(),
         bookmarks: LocalStorageManager.getBookmarks(),
       });
+
+      const cloudDbs = await loadDatabasesFromFirestore(auth.currentUser.uid);
+      const localDbs = LocalStorageManager.getDatabases();
+      const mergedDbs = mergeCloudDatabasesWithLocal(localDbs, cloudDbs);
+      LocalStorageManager.saveDatabases(mergedDbs);
+      if (onDatabasesUpdated) {
+        onDatabasesUpdated(mergedDbs);
+      }
+      await syncDatabasesToFirestore(auth.currentUser.uid, mergedDbs);
+
       const syncTime = new Date(syncResult.lastSyncedAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-      setSyncSuccessNotice(`Sincronização em nuvem concluída com sucesso às ${syncTime}!`);
+      setSyncSuccessNotice(`Sincronização de progresso e bancos (${mergedDbs.length}) concluída às ${syncTime}!`);
       setTimeout(() => setSyncSuccessNotice(null), 4000);
     } catch (err: unknown) {
-      console.error('Manual Firestore Sync Error:', err);
-      setAuthError('Falha na sincronização com o Firestore. Verifique sua conexão com a internet.');
+      console.error('Manual Cloud Sync Error:', err);
+      setAuthError('Falha na sincronização com a nuvem. Verifique sua conexão com a internet.');
     } finally {
       setIsSyncingCloud(false);
     }
@@ -318,23 +395,22 @@ export const UserAccountModal: React.FC<UserAccountModalProps> = ({
       isCloudSyncEnabled: false,
       provider: 'local',
     };
-    LocalStorageManager.saveUserAccount(newAccount);
-    onUpdateAccount(newAccount);
+    const saved = LocalStorageManager.saveUserAccount(newAccount);
+    onUpdateAccount(saved);
     setProfiles(LocalStorageManager.getUserProfiles());
     setNewProfileName('');
     setIsCreatingProfile(false);
+    setEditingProfileId(null);
+    setEditErrors({});
+    onProfileChanged?.();
   };
 
   const handleSwitchProfile = (profileId: string) => {
     const switched = LocalStorageManager.switchUserProfile(profileId);
     onUpdateAccount(switched);
-    setName(switched.name);
-    setEmail(switched.email || '');
-    setAvatar(switched.avatar);
-    setTargetExam(switched.targetExam);
-    setTargetRole(switched.targetRole || '');
-    setDailyGoalQuestions(switched.dailyGoalQuestions);
-    setExperienceLevel(switched.experienceLevel);
+    setEditingProfileId(null);
+    setEditErrors({});
+    onProfileChanged?.();
   };
 
   const handleDeleteProfile = (profileId: string) => {
@@ -346,16 +422,24 @@ export const UserAccountModal: React.FC<UserAccountModalProps> = ({
     if (!profileToDelete) return;
     const remaining = LocalStorageManager.deleteUserProfile(profileToDelete);
     setProfiles(remaining);
+    if (editingProfileId === profileToDelete) {
+      setEditingProfileId(null);
+      setEditErrors({});
+    }
     const current = LocalStorageManager.getUserAccount();
     onUpdateAccount(current);
+    if (current.id !== account.id) {
+      onProfileChanged?.();
+    }
     setProfileToDelete(null);
   };
 
-  const handleExportAccountData = () => {
+  const handleExportAccountData = (targetAccount: UserAccount) => {
+    const profileStats = LocalStorageManager.getStatistics(targetAccount.id);
     const backupObj = {
       version: '2.0',
-      account,
-      statistics: stats,
+      account: targetAccount,
+      statistics: profileStats,
       exportedAt: new Date().toISOString(),
       platform: 'Silenon',
     };
@@ -363,7 +447,7 @@ export const UserAccountModal: React.FC<UserAccountModalProps> = ({
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `perfil_estudo_${account.name.toLowerCase().replace(/\s+/g, '_')}_${Date.now()}.json`;
+    a.download = `perfil_estudo_${targetAccount.name.toLowerCase().replace(/\s+/g, '_')}_${Date.now()}.json`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -377,21 +461,21 @@ export const UserAccountModal: React.FC<UserAccountModalProps> = ({
         <div className="flex items-center justify-between px-5 py-4 border-b border-border shrink-0">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl flex items-center justify-center text-xl bg-accent-subtle border border-accent/30 shrink-0 overflow-hidden">
-              {avatar?.startsWith('http') ? (
+              {account.avatar?.startsWith('http') ? (
                 <img 
-                  src={avatar} 
-                  alt={name} 
+                  src={account.avatar} 
+                  alt={account.name} 
                   className="w-full h-full object-cover rounded-xl avatar-icon" 
                   referrerPolicy="no-referrer"
                 />
               ) : (
-                <span className="avatar-icon emoji-filter" data-emoji="true">{avatar}</span>
+                <span className="avatar-icon emoji-filter" data-emoji="true">{account.avatar}</span>
               )}
             </div>
             <div>
               <div className="flex items-center gap-2">
                 <h2 className="text-base font-bold text-primary theme-text-primary">
-                  {name}
+                  {account.name}
                 </h2>
                 {account.provider === 'google' ? (
                   <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-success-bg text-success border border-success-border flex items-center gap-1">
@@ -404,9 +488,6 @@ export const UserAccountModal: React.FC<UserAccountModalProps> = ({
                   </span>
                 )}
               </div>
-              <p className="text-xs text-muted theme-text-muted">
-                {account.targetExam} • Meta: {account.dailyGoalQuestions}q/dia
-              </p>
             </div>
           </div>
           <button
@@ -418,47 +499,33 @@ export const UserAccountModal: React.FC<UserAccountModalProps> = ({
           </button>
         </div>
 
-        {/* Tab Navigation */}
-        <div className="flex items-center border-b border-border px-5 text-xs font-semibold shrink-0 gap-6">
-          <button
-            onClick={() => setActiveTab('profile')}
-            className={`py-3 border-b-2 transition-colors flex items-center gap-1.5 cursor-pointer ${
-              activeTab === 'profile'
-                ? 'border-accent text-accent'
-                : 'border-transparent text-muted hover:text-primary'
-            }`}
-          >
-            <User className="w-3.5 h-3.5" />
-            <span>Perfil & Metas</span>
-          </button>
-          <button
-            onClick={() => setActiveTab('storage')}
-            className={`py-3 border-b-2 transition-colors flex items-center gap-1.5 cursor-pointer ${
-              activeTab === 'storage'
-                ? 'border-accent text-accent'
-                : 'border-transparent text-muted hover:text-primary'
-            }`}
-          >
-            <HardDrive className="w-3.5 h-3.5" />
-            <span>Armazenamento & Limites</span>
-          </button>
-          <button
-            onClick={() => setActiveTab('profiles')}
-            className={`py-3 border-b-2 transition-colors flex items-center gap-1.5 cursor-pointer ${
-              activeTab === 'profiles'
-                ? 'border-accent text-accent'
-                : 'border-transparent text-muted hover:text-primary'
-            }`}
-          >
-            <Target className="w-3.5 h-3.5" />
-            <span>Multi-Perfis ({profiles.length})</span>
-          </button>
-        </div>
-
-        {/* Modal Body */}
-        <div className="p-5 overflow-y-auto space-y-5 flex-1">
-          {activeTab === 'profile' && (
-            <form onSubmit={handleSaveProfile} noValidate className="space-y-4">
+        {/* Tab Navigation & Horizontal Swipe Carousel */}
+        <HorizontalTabCarousel<UserAccountTabId>
+          activeIndex={Math.max(0, ACCOUNT_TAB_IDS.indexOf(activeTab))}
+          onChange={(idx) => setActiveTab(ACCOUNT_TAB_IDS[idx] ?? 'profile')}
+          indicatorVariant="underline"
+          enableContentSwipe={true}
+          autoHeight={true}
+          measureDeps={[
+            isOpen,
+            profiles.length,
+            editingProfileId,
+            isCreatingProfile,
+            storageInfo,
+            authError,
+            syncSuccessNotice,
+            persistSuccessMsg,
+          ]}
+          className="flex-1 min-h-0"
+          slideClassName="p-5"
+          ariaLabel="Seções da conta"
+          tabs={[
+            {
+              id: 'profile',
+              label: 'Perfil e Metas',
+              icon: <User className="w-3.5 h-3.5 shrink-0" />,
+              content: (
+            <div className="space-y-4">
               {/* Account Quick Stats Bar (Clickable navigation to Metrics) */}
               <button
                 type="button"
@@ -500,43 +567,35 @@ export const UserAccountModal: React.FC<UserAccountModalProps> = ({
               </button>
 
               {/* Google Account Connection Banner */}
-              <div className="p-4 rounded-xl border border-border theme-card space-y-3">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <div className="w-9 h-9 rounded-lg bg-surface-subtle border border-border flex items-center justify-center text-sm font-bold text-secondary shrink-0">
-                      {isGoogleLoading ? (
-                        <Loader2 className="w-4 h-4 animate-spin text-accent" />
-                      ) : (
-                        <span>G</span>
-                      )}
-                    </div>
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-1.5 flex-wrap">
-                        <span className="text-xs font-bold text-primary theme-text-primary">
-                          {account.provider === 'google' ? 'Conta Google Conectada' : 'Login com Conta Google'}
-                        </span>
-                        {account.provider === 'google' ? (
-                          <span className="text-[10px] font-medium px-1.5 py-0.2 rounded bg-success-bg text-success border border-success-border flex items-center gap-1">
-                            <ShieldCheck className="w-3 h-3" />
-                            <span>Firestore Ativo</span>
-                          </span>
-                        ) : (
-                          <span className="text-[10px] font-medium px-1.5 py-0.2 rounded bg-surface-subtle text-muted border border-border">
-                            Nuvem Firebase
-                          </span>
-                        )}
+              <div className="space-y-2.5">
+                {account.provider === 'google' ? (
+                  <div className="p-4 rounded-xl border border-border theme-card">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <div className="w-9 h-9 rounded-lg bg-surface-subtle border border-border flex items-center justify-center text-sm font-bold text-secondary shrink-0">
+                          {isGoogleLoading ? (
+                            <Loader2 className="w-4 h-4 animate-spin text-accent" />
+                          ) : (
+                            <span>G</span>
+                          )}
+                        </div>
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="text-xs font-bold text-primary theme-text-primary">
+                              Conta Google Conectada
+                            </span>
+                            <span className="text-[10px] font-medium px-1.5 py-0.2 rounded bg-success-bg text-success border border-success-border flex items-center gap-1">
+                              <ShieldCheck className="w-3 h-3" />
+                              <span>Sincronia Ativa</span>
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-muted theme-text-muted truncate">
+                            {`${account.email || 'Autenticado'} • Progresso e provas salvos na nuvem`}
+                          </div>
+                        </div>
                       </div>
-                      <div className="text-[11px] text-muted theme-text-muted truncate">
-                        {account.provider === 'google' 
-                          ? `${account.email || 'Autenticado'} • Sincronização em nuvem ativa` 
-                          : 'Sincronize seu progresso, simulados e estatísticas de forma segura no Firestore'}
-                      </div>
-                    </div>
-                  </div>
 
-                  <div className="flex items-center gap-2 shrink-0">
-                    {account.provider === 'google' ? (
-                      <>
+                      <div className="flex items-center gap-2 shrink-0">
                         <button
                           type="button"
                           onClick={handleManualSync}
@@ -555,29 +614,39 @@ export const UserAccountModal: React.FC<UserAccountModalProps> = ({
                         >
                           {isGoogleLoading ? 'Aguarde...' : 'Desconectar'}
                         </button>
-                      </>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={handleGoogleConnect}
-                        disabled={isGoogleLoading}
-                        className="px-3.5 py-1.5 text-xs font-semibold rounded-lg border border-border bg-surface-subtle hover:bg-surface-hover text-secondary transition-colors flex items-center gap-2 shadow-xs cursor-pointer disabled:opacity-50"
-                      >
-                        {isGoogleLoading ? (
-                          <>
-                            <Loader2 className="w-3.5 h-3.5 animate-spin text-accent" />
-                            <span>Conectando...</span>
-                          </>
-                        ) : (
-                          <>
-                            <span className="font-bold text-accent">G</span>
-                            <span>Entrar com Google</span>
-                          </>
-                        )}
-                      </button>
-                    )}
+                      </div>
+                    </div>
                   </div>
-                </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={handleGoogleConnect}
+                    disabled={isGoogleLoading}
+                    className="w-full p-4 rounded-xl border border-border theme-card hover:bg-surface-hover transition-colors cursor-pointer flex items-center justify-between gap-3 text-left disabled:opacity-50"
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="w-9 h-9 rounded-lg bg-surface-subtle border border-border flex items-center justify-center text-sm font-bold text-accent shrink-0">
+                        {isGoogleLoading ? (
+                          <Loader2 className="w-4 h-4 animate-spin text-accent" />
+                        ) : (
+                          <span>G</span>
+                        )}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-xs font-bold text-primary theme-text-primary">
+                          {isGoogleLoading ? 'Conectando...' : 'Entrar com Google'}
+                        </div>
+                        <div className="text-[11px] text-muted theme-text-muted truncate">
+                          Entre para sincronizar entre dispositivos
+                        </div>
+                      </div>
+                    </div>
+
+                    <span className="text-[10px] font-medium px-2 py-0.5 rounded bg-surface-subtle text-muted border border-border shrink-0">
+                      Backup na Nuvem
+                    </span>
+                  </button>
+                )}
 
                 {/* Error Banner */}
                 {authError && (
@@ -598,176 +667,14 @@ export const UserAccountModal: React.FC<UserAccountModalProps> = ({
                   </div>
                 )}
               </div>
-
-              {/* Avatar Selector */}
-              <div>
-                <label className="block text-xs font-semibold text-secondary theme-text-secondary mb-1.5">
-                  Avatar do Perfil
-                </label>
-                <div className="flex flex-wrap gap-2">
-                  {AVATAR_OPTIONS.map((icon) => (
-                    <button
-                      key={icon}
-                      type="button"
-                      onClick={() => setAvatar(icon)}
-                      className={`w-9 h-9 rounded-xl text-lg flex items-center justify-center border transition-all cursor-pointer ${
-                        avatar === icon
-                          ? 'border-accent bg-accent-subtle scale-110 shadow-xs'
-                          : 'border-border hover:border-accent theme-card'
-                      }`}
-                    >
-                      <span className="avatar-icon emoji-filter" data-emoji="true">{icon}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Profile Inputs */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-secondary theme-text-secondary mb-1">
-                    Nome / Apelido *
-                  </label>
-                  <input
-                    type="text"
-                    value={name}
-                    onChange={(e) => {
-                      setName(e.target.value);
-                      if (formErrors.name) {
-                        setFormErrors(prev => ({ ...prev, name: undefined }));
-                      }
-                    }}
-                    placeholder="Seu nome ou identificação"
-                    className={`w-full px-3 py-2 text-sm rounded-lg theme-input focus:outline-hidden ${
-                      formErrors.name ? 'border-danger focus:border-danger' : 'focus:border-accent'
-                    }`}
-                  />
-                  {formErrors.name && (
-                    <div className="mt-1.5 text-xs text-danger flex items-center gap-1.5" role="alert">
-                      <AlertCircle className="w-3.5 h-3.5 shrink-0 text-danger" />
-                      <span>{formErrors.name}</span>
-                    </div>
-                  )}
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-secondary theme-text-secondary mb-1">
-                    E-mail
-                  </label>
-                  <input
-                    type="text"
-                    value={email}
-                    onChange={(e) => {
-                      setEmail(e.target.value);
-                      if (formErrors.email) {
-                        setFormErrors(prev => ({ ...prev, email: undefined }));
-                      }
-                    }}
-                    placeholder="seu.email@exemplo.com"
-                    className={`w-full px-3 py-2 text-sm rounded-lg theme-input focus:outline-hidden ${
-                      formErrors.email ? 'border-danger focus:border-danger' : 'focus:border-accent'
-                    }`}
-                  />
-                  {formErrors.email && (
-                    <div className="mt-1.5 text-xs text-danger flex items-center gap-1.5" role="alert">
-                      <AlertCircle className="w-3.5 h-3.5 shrink-0 text-danger" />
-                      <span>{formErrors.email}</span>
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* Target Exam & Role */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-secondary theme-text-secondary mb-1">
-                    Área / Foco de Estudo
-                  </label>
-                  <input
-                    type="text"
-                    value={targetExam}
-                    onChange={(e) => setTargetExam(e.target.value)}
-                    placeholder="Ex: ENEM / Medicina"
-                    className="w-full px-3 py-2 text-sm rounded-lg theme-input focus:outline-hidden focus:border-accent"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-secondary theme-text-secondary mb-1">
-                    Meta de Conhecimento / Módulo
-                  </label>
-                  <input
-                    type="text"
-                    value={targetRole}
-                    onChange={(e) => setTargetRole(e.target.value)}
-                    placeholder="Ex: Ciências da Natureza e Matemática"
-                    className="w-full px-3 py-2 text-sm rounded-lg theme-input focus:outline-hidden focus:border-accent"
-                  />
-                </div>
-              </div>
-
-              {/* Daily Goal & Level */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-secondary theme-text-secondary mb-1">
-                    Meta Diária de Questões
-                  </label>
-                  <select
-                    value={dailyGoalQuestions}
-                    onChange={(e) => setDailyGoalQuestions(Number(e.target.value))}
-                    className="w-full px-3 py-2 text-sm rounded-lg border border-border bg-surface text-primary focus:outline-hidden focus:border-accent cursor-pointer"
-                  >
-                    <option value={15}>15 questões / dia (Ritmo Leve)</option>
-                    <option value={30}>30 questões / dia (Ritmo Constante)</option>
-                    <option value={50}>50 questões / dia (Foco Intenso)</option>
-                    <option value={80}>80 questões / dia (Aprofundamento)</option>
-                    <option value={100}>100+ questões / dia (Modo Imersivo)</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-secondary theme-text-secondary mb-1">
-                    Nível de Experiência
-                  </label>
-                  <select
-                    value={experienceLevel}
-                    onChange={(e) => setExperienceLevel(e.target.value as any)}
-                    className="w-full px-3 py-2 text-sm rounded-lg border border-border bg-surface text-primary focus:outline-hidden focus:border-accent cursor-pointer"
-                  >
-                    <option value="iniciante">Iniciante (Primeiros passos)</option>
-                    <option value="intermediario">Intermediário (Base consolidada)</option>
-                    <option value="avancado">Avançado (Alto índice de acertos)</option>
-                    <option value="faixa_preta">Domínio Pleno / Especialista</option>
-                  </select>
-                </div>
-              </div>
-
-              {/* Actions Row */}
-              <div className="flex items-center justify-between pt-2">
-                <button
-                  type="button"
-                  onClick={handleExportAccountData}
-                  className="px-3 py-2 text-xs font-medium rounded-lg border border-border theme-card hover:bg-surface-hover transition-colors flex items-center gap-1.5 cursor-pointer text-primary theme-text-primary"
-                >
-                  <Download className="w-3.5 h-3.5" />
-                  <span>Baixar Backup do Perfil</span>
-                </button>
-                <div className="flex items-center gap-2">
-                  {isSavedNotice && (
-                    <span className="text-xs font-semibold text-success flex items-center gap-1">
-                      <Check className="w-3.5 h-3.5" />
-                      <span>Salvo com sucesso!</span>
-                    </span>
-                  )}
-                  <button
-                    type="submit"
-                    className="px-4 py-2 text-xs font-semibold rounded-lg theme-btn-accent transition-colors cursor-pointer shadow-xs"
-                  >
-                    Salvar Alterações
-                  </button>
-                </div>
-              </div>
-            </form>
-          )}
-
-          {activeTab === 'storage' && (
+            </div>
+              ),
+            },
+            {
+              id: 'storage',
+              label: 'Armazenamento e Limites',
+              icon: <HardDrive className="w-3.5 h-3.5 shrink-0" />,
+              content: (
             <div className="space-y-4">
               {/* Storage Telemetry Meter */}
               <div className="p-4 rounded-xl border border-border theme-card space-y-3">
@@ -775,7 +682,7 @@ export const UserAccountModal: React.FC<UserAccountModalProps> = ({
                   <div className="flex items-center gap-2">
                     <HardDrive className="w-4 h-4 text-accent" />
                     <span className="text-xs font-bold text-primary theme-text-primary">
-                      Uso de Armazenamento do Navegador
+                      Uso de Armazenamento
                     </span>
                   </div>
                   <span className="text-xs font-mono font-semibold text-secondary theme-text-secondary">
@@ -792,8 +699,8 @@ export const UserAccountModal: React.FC<UserAccountModalProps> = ({
                 </div>
 
                 <div className="flex items-center justify-between text-[11px] text-muted theme-text-muted">
-                  <span>Banco de questões + Histórico + SRS</span>
-                  <span>{storageInfo?.percentUsed}% da cota utilizada</span>
+                  <span>Provas, respostas e revisões salvas no aparelho</span>
+                  <span>{storageInfo?.percentUsed ?? 0}% utilizado</span>
                 </div>
               </div>
 
@@ -803,12 +710,10 @@ export const UserAccountModal: React.FC<UserAccountModalProps> = ({
                   <div>
                     <div className="flex items-center gap-1.5 text-xs font-bold text-primary theme-text-primary">
                       <Lock className="w-3.5 h-3.5 text-warning" />
-                      <span>Blindagem Contra Expurgamento (Persistência)</span>
+                      <span>Progresso protegido no aparelho</span>
                     </div>
                     <p className="text-xs text-muted theme-text-muted mt-0.5 leading-relaxed">
-                      {storageInfo?.isPersisted 
-                        ? 'O navegador garantiu modo persistente. Seus bancos de questões e respostas NUNCA serão apagados automaticamente para liberar espaço em disco.'
-                        : 'Por padrão, navegadores podem limpar o cache de sites se o disco estiver cheio. Ative a persistência para blindar seus dados permanentemente.'}
+                      Seus dados estão protegidos contra limpeza automática do navegador.
                     </p>
                   </div>
                   {!storageInfo?.isPersisted && (
@@ -818,7 +723,7 @@ export const UserAccountModal: React.FC<UserAccountModalProps> = ({
                       disabled={isPersisting}
                       className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-warning hover:opacity-90 text-warning-contrast shrink-0 transition-colors cursor-pointer shadow-xs"
                     >
-                      {isPersisting ? 'Solicitando...' : 'Blindar Dados'}
+                      {isPersisting ? 'Protegendo...' : 'Proteger Dados'}
                     </button>
                   )}
                 </div>
@@ -829,40 +734,22 @@ export const UserAccountModal: React.FC<UserAccountModalProps> = ({
                   </div>
                 )}
               </div>
-
-              {/* Browser Quotas Guide (Answers user's question directly in the UI as well) */}
-              <div className="p-4 rounded-xl border border-border theme-card-subtle space-y-2">
-                <div className="flex items-center gap-1.5 text-xs font-bold text-primary theme-text-primary">
-                  <Info className="w-3.5 h-3.5 text-accent" />
-                  <span>Limites Reais de Armazenamento por Navegador:</span>
-                </div>
-                <ul className="text-xs space-y-1.5 text-secondary theme-text-secondary leading-relaxed list-disc pl-4">
-                  <li>
-                    <strong className="text-primary theme-text-primary">Chrome / Edge / Chromium:</strong> Até <strong>60% do espaço livre em disco</strong>. Em computadores modernos, costuma ultrapassar <strong>20 GB a 100 GB+</strong> sem custo ou limite rígido.
-                  </li>
-                  <li>
-                    <strong className="text-primary theme-text-primary">Firefox:</strong> Até <strong>50% do disco livre</strong> (com cota padrão de até 2 GB por domínio, expansível automaticamente).
-                  </li>
-                  <li>
-                    <strong className="text-primary theme-text-primary">Safari / WebKit:</strong> Cota de <strong>1 GB</strong> antes de exigir confirmação do usuário. Em abas comuns sem PWA instalada, dados podem sofrer limpeza após 7 dias de inatividade.
-                  </li>
-                  <li>
-                    <strong className="text-primary theme-text-primary">LocalStorage Puro:</strong> Limitado a <strong>5 MB a 10 MB</strong> por domínio.
-                  </li>
-                </ul>
-              </div>
             </div>
-          )}
-
-          {activeTab === 'profiles' && (
+              ),
+            },
+            {
+              id: 'profiles',
+              label: `Contas (${profiles.length})`,
+              icon: <Target className="w-3.5 h-3.5 shrink-0" />,
+              content: (
             <div className="space-y-4">
               <div className="flex items-center justify-between">
                 <div>
                   <h3 className="text-xs font-bold text-primary theme-text-primary">
-                    Gerenciar Perfis de Estudo
+                    Gerenciar Contas
                   </h3>
                   <p className="text-xs text-muted theme-text-muted">
-                    Crie múltiplos perfis para organizar seus estudos por temas, escrituras, módulos ou metas.
+                    Crie múltiplas contas para organizar seus estudos por matérias, simulados ou metas.
                   </p>
                 </div>
                 {!isCreatingProfile && (
@@ -887,7 +774,7 @@ export const UserAccountModal: React.FC<UserAccountModalProps> = ({
                       type="text"
                       value={newProfileName}
                       onChange={(e) => setNewProfileName(e.target.value)}
-                      placeholder="Ex: Foco D&C, Memorização, Conhecimentos Gerais"
+                      placeholder="Ex: Foco ENEM, Matemática, Revisão Final"
                       className="flex-1 px-3 py-1.5 text-xs rounded-lg theme-input focus:outline-hidden focus:border-accent"
                     />
                     <button
@@ -912,73 +799,264 @@ export const UserAccountModal: React.FC<UserAccountModalProps> = ({
               <div className="space-y-2">
                 {profiles.map((prof) => {
                   const isActive = prof.id === account.id;
+                  const isEditing = editingProfileId === prof.id;
                   return (
                     <div
                       key={prof.id}
-                      className={`p-3 rounded-xl border flex items-center justify-between gap-3 transition-all ${
+                      className={`p-3 rounded-xl border transition-all ${
                         isActive
                           ? 'border-accent bg-accent-subtle shadow-xs'
                           : 'theme-card hover:border-accent'
                       }`}
                     >
-                      <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 rounded-lg flex items-center justify-center text-lg bg-surface-subtle border border-border shrink-0 overflow-hidden">
-                          {prof.avatar?.startsWith('http') ? (
-                            <img 
-                              src={prof.avatar} 
-                              alt={prof.name} 
-                              className="w-full h-full object-cover rounded-lg avatar-icon" 
-                              referrerPolicy="no-referrer"
-                            />
-                          ) : (
-                            <span className="avatar-icon emoji-filter" data-emoji="true">{prof.avatar}</span>
-                          )}
-                        </div>
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <span className="text-xs font-bold text-primary theme-text-primary">
-                              {prof.name}
-                            </span>
-                            {isActive && (
-                              <span className="text-[10px] font-bold px-2 py-0.2 rounded-full bg-accent text-accent-contrast">
-                                Ativo
-                              </span>
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-3 min-w-0">
+                          <div className="w-8 h-8 rounded-lg flex items-center justify-center text-lg bg-surface-subtle border border-border shrink-0 overflow-hidden">
+                            {prof.avatar?.startsWith('http') ? (
+                              <img 
+                                src={prof.avatar} 
+                                alt={prof.name} 
+                                className="w-full h-full object-cover rounded-lg avatar-icon" 
+                                referrerPolicy="no-referrer"
+                              />
+                            ) : (
+                              <span className="avatar-icon emoji-filter" data-emoji="true">{prof.avatar}</span>
                             )}
                           </div>
-                          <span className="text-[11px] text-muted theme-text-muted">
-                            {prof.targetExam} • Meta: {prof.dailyGoalQuestions}q/dia
-                          </span>
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs font-bold text-primary theme-text-primary truncate">
+                                {prof.name}
+                              </span>
+                              {isActive && (
+                                <span className="text-[10px] font-bold px-2 py-0.2 rounded-full bg-accent text-accent-contrast shrink-0">
+                                  Ativo
+                                </span>
+                              )}
+                            </div>
+                            <span className="text-[11px] text-muted theme-text-muted block truncate">
+                              {prof.targetExam ? `${prof.targetExam} • ` : ''}Meta: {prof.dailyGoalQuestions}q/dia
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-1 shrink-0">
+                          {!isActive && (
+                            <button
+                              type="button"
+                              onClick={() => handleSwitchProfile(prof.id)}
+                              className="p-1.5 rounded-lg theme-text-muted text-secondary hover:text-primary hover:bg-surface-hover transition-colors cursor-pointer"
+                              title="Alternar conta"
+                              aria-label="Alternar conta"
+                            >
+                              <ArrowLeftRight className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => handleExportAccountData(prof)}
+                            className="p-1.5 rounded-lg theme-text-muted text-secondary hover:text-primary hover:bg-surface-hover transition-colors cursor-pointer"
+                            title="Baixar backup da conta"
+                            aria-label="Baixar backup da conta"
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleToggleEditAccordion(prof)}
+                            className={`p-1.5 rounded-lg theme-text-muted text-secondary hover:text-primary hover:bg-surface-hover transition-colors cursor-pointer ${
+                              isEditing ? 'bg-surface-hover text-primary' : ''
+                            }`}
+                            title={isEditing ? 'Fechar edição' : 'Editar conta'}
+                            aria-label={isEditing ? 'Fechar edição' : 'Editar conta'}
+                            aria-expanded={isEditing}
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                          </button>
+                          {profiles.length > 1 && !isActive && (
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteProfile(prof.id)}
+                              className="p-1.5 rounded-lg theme-text-muted text-secondary hover:text-primary hover:bg-surface-hover transition-colors cursor-pointer"
+                              title="Excluir conta"
+                              aria-label="Excluir conta"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-1.5">
-                        {!isActive && (
-                          <button
-                            type="button"
-                            onClick={() => handleSwitchProfile(prof.id)}
-                            className="px-2.5 py-1 text-xs font-semibold rounded-lg border border-border theme-card hover:bg-surface-hover transition-colors cursor-pointer text-primary theme-text-primary"
-                          >
-                            Alternar
-                          </button>
-                        )}
-                        {profiles.length > 1 && !isActive && (
-                          <button
-                            type="button"
-                            onClick={() => handleDeleteProfile(prof.id)}
-                            className="p-1 text-danger hover:bg-danger-bg rounded transition-colors cursor-pointer"
-                            title="Excluir perfil"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        )}
-                      </div>
+                      {isEditing && (
+                        <div className="mt-3 pt-3 border-t border-border space-y-4 animate-in fade-in duration-150">
+                          {/* Avatar Selector */}
+                          <div>
+                            <label className="block text-xs font-semibold text-secondary theme-text-secondary mb-1.5">
+                              Avatar da conta
+                            </label>
+                            <div className="flex flex-wrap gap-2">
+                              {AVATAR_OPTIONS.map((icon) => (
+                                <button
+                                  key={icon}
+                                  type="button"
+                                  onClick={() => setEditAvatar(icon)}
+                                  className={`w-9 h-9 rounded-xl text-lg flex items-center justify-center border transition-all cursor-pointer ${
+                                    editAvatar === icon
+                                      ? 'border-accent bg-accent-subtle scale-110 shadow-xs'
+                                      : 'border-border hover:border-accent theme-card'
+                                  }`}
+                                >
+                                  <span className="avatar-icon emoji-filter" data-emoji="true">{icon}</span>
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+
+                          {/* Profile Inputs */}
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            <div>
+                              <label className="block text-xs font-medium text-secondary theme-text-secondary mb-1">
+                                Nome / Apelido *
+                              </label>
+                              <input
+                                type="text"
+                                value={editName}
+                                onChange={(e) => {
+                                  setEditName(e.target.value);
+                                  if (editErrors.name) {
+                                    setEditErrors(prev => ({ ...prev, name: undefined }));
+                                  }
+                                }}
+                                placeholder="Seu nome ou identificação"
+                                className={`w-full px-3 py-2 text-sm rounded-lg theme-input focus:outline-hidden ${
+                                  editErrors.name ? 'border-danger focus:border-danger' : 'focus:border-accent'
+                                }`}
+                              />
+                              {editErrors.name && (
+                                <div className="mt-1.5 text-xs text-danger flex items-center gap-1.5" role="alert">
+                                  <AlertCircle className="w-3.5 h-3.5 shrink-0 text-danger" />
+                                  <span>{editErrors.name}</span>
+                                </div>
+                              )}
+                            </div>
+                            <div>
+                              <label className="block text-xs font-medium text-secondary theme-text-secondary mb-1">
+                                E-mail
+                              </label>
+                              <input
+                                type="text"
+                                value={editEmail}
+                                onChange={(e) => {
+                                  setEditEmail(e.target.value);
+                                  if (editErrors.email) {
+                                    setEditErrors(prev => ({ ...prev, email: undefined }));
+                                  }
+                                }}
+                                placeholder="seu.email@exemplo.com"
+                                className={`w-full px-3 py-2 text-sm rounded-lg theme-input focus:outline-hidden ${
+                                  editErrors.email ? 'border-danger focus:border-danger' : 'focus:border-accent'
+                                }`}
+                              />
+                              {editErrors.email && (
+                                <div className="mt-1.5 text-xs text-danger flex items-center gap-1.5" role="alert">
+                                  <AlertCircle className="w-3.5 h-3.5 shrink-0 text-danger" />
+                                  <span>{editErrors.email}</span>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Target Exam & Role */}
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            <div>
+                              <label className="block text-xs font-medium text-secondary theme-text-secondary mb-1">
+                                Área / Foco de Estudo
+                              </label>
+                              <input
+                                type="text"
+                                value={editTargetExam}
+                                onChange={(e) => setEditTargetExam(e.target.value)}
+                                placeholder="Ex: ENEM / Medicina"
+                                className="w-full px-3 py-2 text-sm rounded-lg theme-input focus:outline-hidden focus:border-accent"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-medium text-secondary theme-text-secondary mb-1">
+                                Meta de Conhecimento / Módulo
+                              </label>
+                              <input
+                                type="text"
+                                value={editTargetRole}
+                                onChange={(e) => setEditTargetRole(e.target.value)}
+                                placeholder="Ex: Ciências da Natureza e Matemática"
+                                className="w-full px-3 py-2 text-sm rounded-lg theme-input focus:outline-hidden focus:border-accent"
+                              />
+                            </div>
+                          </div>
+
+                          {/* Daily Goal & Level */}
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            <div>
+                              <label className="block text-xs font-medium text-secondary theme-text-secondary mb-1">
+                                Meta Diária de Questões
+                              </label>
+                              <select
+                                value={editDailyGoalQuestions}
+                                onChange={(e) => setEditDailyGoalQuestions(Number(e.target.value))}
+                                className="w-full px-3 py-2 text-sm rounded-lg border border-border bg-surface text-primary focus:outline-hidden focus:border-accent cursor-pointer"
+                              >
+                                <option value={15}>15 questões / dia (Ritmo Leve)</option>
+                                <option value={30}>30 questões / dia (Ritmo Constante)</option>
+                                <option value={50}>50 questões / dia (Foco Intenso)</option>
+                                <option value={80}>80 questões / dia (Aprofundamento)</option>
+                                <option value={100}>100+ questões / dia (Modo Imersivo)</option>
+                              </select>
+                            </div>
+                            <div>
+                              <label className="block text-xs font-medium text-secondary theme-text-secondary mb-1">
+                                Nível de Experiência
+                              </label>
+                              <select
+                                value={editExperienceLevel}
+                                onChange={(e) => setEditExperienceLevel(e.target.value as UserAccount['experienceLevel'])}
+                                className="w-full px-3 py-2 text-sm rounded-lg border border-border bg-surface text-primary focus:outline-hidden focus:border-accent cursor-pointer"
+                              >
+                                <option value="iniciante">Iniciante (Primeiros passos)</option>
+                                <option value="intermediario">Intermediário (Base consolidada)</option>
+                                <option value="avancado">Avançado (Alto índice de acertos)</option>
+                                <option value="faixa_preta">Domínio Pleno / Especialista</option>
+                              </select>
+                            </div>
+                          </div>
+
+                          {/* Accordion Footer */}
+                          <div className="flex items-center justify-between pt-1">
+                            <button
+                              type="button"
+                              onClick={() => handleDiscardEdit(prof)}
+                              className="px-3 py-2 text-xs font-medium rounded-lg theme-btn-secondary transition-colors cursor-pointer"
+                            >
+                              Descartar alterações
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleSaveEditedAccount(prof)}
+                              className="px-4 py-2 text-xs font-semibold rounded-lg theme-btn-accent transition-colors cursor-pointer shadow-xs"
+                            >
+                              Salvar Alterações
+                            </button>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   );
                 })}
               </div>
             </div>
-          )}
-        </div>
+              ),
+            },
+          ] satisfies HorizontalTabItem<UserAccountTabId>[]}
+        />
       </div>
 
       <ConfirmModal

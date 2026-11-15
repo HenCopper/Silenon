@@ -92,7 +92,7 @@ export const Header: React.FC<HeaderProps> = ({
       case 'simulado':
         return 'Modo Simulado';
       case 'metrics':
-        return 'Métricas & Desempenho';
+        return 'Métricas e Desempenho';
       default:
         return 'Silenon';
     }
@@ -130,7 +130,7 @@ export const Header: React.FC<HeaderProps> = ({
               id="header-app-info-btn"
               onClick={onOpenAppInfo}
               className="flex items-center gap-2 px-1.5 py-1 -my-1 rounded-lg hover:bg-surface-hover transition-colors cursor-pointer group text-left shrink-0"
-              title="Sobre o Silenon & Instalação"
+              title="Sobre o Silenon e Instalação"
               aria-label="Abrir informações sobre o App"
             >
               <MemorizLogo size={28} />
@@ -175,7 +175,7 @@ export const Header: React.FC<HeaderProps> = ({
               type="button"
               onClick={onOpenXPPerformance}
               className="hidden 2xl:flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-lg font-medium shrink-0 xp-header-pill border hover:opacity-90 active:scale-98 transition-all cursor-pointer shadow-2xs"
-              title="Clique para ver seu Painel de Desempenho & Metas"
+              title="Clique para ver seu Painel de Desempenho e Metas"
             >
               <div className="flex items-center gap-1 font-semibold">
                 <Flame className="w-3.5 h-3.5 xp-flame-icon shrink-0" />
@@ -188,26 +188,26 @@ export const Header: React.FC<HeaderProps> = ({
               </div>
             </button>
 
-            {/* Draggable Theme Toggle (Light -> Dark -> Reading -> Night; 3x click opens Dev mode) */}
-            <DraggableThemeSwitcher
-              theme={theme}
-              onToggleTheme={onToggleTheme}
-              onTriggerDevMode={onOpenKitchenSink}
-            />
-
-            {/* Discrete AI Assistant / BYOK Configuration Button */}
+            {/* 1. Discrete AI Assistant / BYOK Configuration Button */}
             {onOpenAIAssistant && (
               <button
                 id="header-ai-assistant-btn"
                 type="button"
                 onClick={onOpenAIAssistant}
                 className="p-2 rounded-lg hover:bg-surface-hover transition-colors border border-transparent hover:border-border cursor-pointer shrink-0"
-                title="Configurar Chaves de IA (Gemini & Groq)"
-                aria-label="Configurar Chaves de IA"
+                title="Abrir Assistente de Estudos"
+                aria-label="Abrir Assistente de Estudos"
               >
                 <GeminiIcon className="w-4 h-4" />
               </button>
             )}
+
+            {/* 2. Draggable Theme Toggle (Light -> Dark -> Reading -> Night; 3x click opens Dev mode) */}
+            <DraggableThemeSwitcher
+              theme={theme}
+              onToggleTheme={onToggleTheme}
+              onTriggerDevMode={onOpenKitchenSink}
+            />
 
             {/* Pause / Resume Button */}
             {onTogglePause && (

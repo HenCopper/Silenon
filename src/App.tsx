@@ -4,6 +4,7 @@
  */
 
 import React from 'react';
+import { Loader2 } from 'lucide-react';
 import { LocalStorageManager } from './lib/storage';
 import { getQuestionContentHash } from './lib/duplicateEngine';
 import { applyThemeToDOM } from './hooks/useTheme';
@@ -23,8 +24,14 @@ import { AssociatedContextPanel } from './components/AssociatedContextPanel';
 import { PauseOverlay } from './components/PauseOverlay';
 import { CarouselDiagnosticOverlay } from './components/CarouselDiagnosticOverlay';
 import { DraggableModeSwitcher } from './components/DraggableModeSwitcher';
+import { InAppBrowserGuard } from './components/InAppBrowserGuard';
+import { SelectionAskPopover } from './components/SelectionAskPopover';
 import { hasAnyAIKey } from './lib/aiOrchestrator';
 import { syncWindow } from './lib/mediaWindowCache';
+import {
+  syncLoadingTipSession,
+  maybeReplenishLoadingTipsInBackground,
+} from './lib/loadingTipsManager';
 
 // Lazy-loaded Secondary Views & Modals (Code Splitting)
 const loadSRSModeView = () =>
@@ -75,6 +82,7 @@ export default function App() {
 
   // 1. Theme Management Hook
   const { theme, setTheme, handleToggleTheme } = useTheme();
+  const [pendingStriveQuote, setPendingStriveQuote] = React.useState<{ text: string; timestamp: number } | null>(null);
 
   // 2. Study Carousel & Modes Navigation Hook
   const {
@@ -100,6 +108,9 @@ export default function App() {
   const {
     databases,
     setDatabases,
+    isLoadingDefaultBanks,
+    defaultBanksError,
+    handleRetryDefaultBanks,
     questions,
     answers,
     srsItems,
@@ -137,6 +148,7 @@ export default function App() {
     handleSaveSRSFromView,
     handleRecordSRSAnswer,
     handleResetAllProgress,
+    reloadStudyProgress,
     handleUpdateElapsedSeconds,
     handleUpdateDailyGoalXP,
   } = useStudyData({ currentMode });
@@ -155,15 +167,7 @@ export default function App() {
     scrollPracticeSlideToTop();
   }, [setCurrentIndex, filteredQuestions.length, scrollPracticeSlideToTop]);
 
-  // 4. User Account & Cloud Synchronization Hook
-  const { userAccount, setUserAccount } = useUserAccount({
-    stats,
-    srsItems,
-    answers,
-    bookmarks,
-  });
-
-  // 5. Modal Windows & Keyboard Shortcuts Hook
+  // 4. Modal Windows & Keyboard Shortcuts Hook
   const {
     isSidebarOpen,
     setIsSidebarOpen,
@@ -196,12 +200,71 @@ export default function App() {
     onToggleBookmark: () => handleToggleBookmark(),
   });
 
+  // 5. User Account & Cloud Synchronization Hook (Progress, Databases & Encrypted Keys Vault)
+  const { userAccount, setUserAccount } = useUserAccount({
+    stats,
+    srsItems,
+    answers,
+    bookmarks,
+    databases,
+    onDatabasesRestored: (mergedDbs) => {
+      setDatabases(mergedDbs);
+    },
+    onEncryptedVaultDetected: () => {
+      setIsBYOKModalOpen(true);
+    },
+  });
+
   // Synchronize sliding window media cache in Practice Mode
   React.useEffect(() => {
     if (currentMode === 'practice' && filteredQuestions.length > 0) {
       syncWindow(filteredQuestions, currentIndex);
     }
   }, [currentMode, filteredQuestions, currentIndex]);
+
+  // Pre-mount loading tips stock sync, next-tip staging & silent AI replenishment
+  const prevTipStateRef = React.useRef<{ profileId: string; errorSignature: string } | null>(null);
+  React.useEffect(() => {
+    if (isLoadingDefaultBanks) return;
+
+    const profileId = userAccount.id || 'user_main';
+    const isInitialRun = prevTipStateRef.current === null;
+    const profileChanged = !isInitialRun && prevTipStateRef.current?.profileId !== profileId;
+
+    const { errorSignature } = syncLoadingTipSession({
+      profileId,
+      questions,
+      answers,
+      activeDatabaseId: filters.database_id,
+      consumeDisplayedTip: isInitialRun,
+    });
+
+    const hasNewError =
+      !isInitialRun &&
+      !profileChanged &&
+      Boolean(errorSignature) &&
+      errorSignature !== prevTipStateRef.current?.errorSignature;
+
+    prevTipStateRef.current = { profileId, errorSignature };
+
+    const triggerReason = profileChanged
+      ? 'profile-switch'
+      : hasNewError
+      ? 'new-error'
+      : 'startup';
+
+    const timerId = window.setTimeout(() => {
+      void maybeReplenishLoadingTipsInBackground({
+        profileId,
+        questions,
+        answers,
+        activeDatabaseId: filters.database_id,
+        triggerReason,
+      });
+    }, isInitialRun ? 1400 : 300);
+
+    return () => window.clearTimeout(timerId);
+  }, [isLoadingDefaultBanks, userAccount.id, questions, answers, filters.database_id]);
 
   // Idle Prefetching of primary secondary chunks after Practice Mode mounts
   const [shouldMountSecondarySlides, setShouldMountSecondarySlides] = React.useState(false);
@@ -354,7 +417,37 @@ export default function App() {
                       }
                     >
                       {/* Questions View */}
-                      {filteredQuestions.length === 0 ? (
+                      {isLoadingDefaultBanks ? (
+                        <div className="theme-card border border-border rounded-xl p-10 text-center space-y-3 shadow-xs">
+                          <div className="w-12 h-12 bg-surface-subtle text-accent border border-border rounded-lg flex items-center justify-center mx-auto">
+                            <Loader2 className="w-6 h-6 animate-spin" />
+                          </div>
+                          <h3 className="font-semibold text-base text-primary theme-text-primary">
+                            Carregando bancos iniciais...
+                          </h3>
+                          <p className="text-xs text-muted theme-text-muted max-w-sm mx-auto">
+                            Importando as provas do ENEM 2024 e ENEM 2025 para seu dispositivo.
+                          </p>
+                        </div>
+                      ) : defaultBanksError && databases.length === 0 ? (
+                        <div className="theme-card border border-border rounded-xl p-10 text-center space-y-3 shadow-xs">
+                          <div className="w-12 h-12 bg-danger-bg text-danger border border-danger-border rounded-lg flex items-center justify-center mx-auto text-xl font-bold">
+                            !
+                          </div>
+                          <h3 className="font-semibold text-base text-primary theme-text-primary">
+                            Erro ao carregar bancos padrão
+                          </h3>
+                          <p className="text-xs text-muted theme-text-muted max-w-sm mx-auto">
+                            {defaultBanksError}
+                          </p>
+                          <button
+                            onClick={() => void handleRetryDefaultBanks()}
+                            className="px-4 py-2 theme-btn-accent font-medium rounded-lg text-xs transition-colors cursor-pointer"
+                          >
+                            Tentar Novamente
+                          </button>
+                        </div>
+                      ) : filteredQuestions.length === 0 ? (
                         <div className="theme-card border border-border rounded-xl p-10 text-center space-y-3 shadow-xs">
                           <div className="w-12 h-12 bg-surface-subtle text-muted border border-border rounded-lg flex items-center justify-center mx-auto text-xl font-bold">
                             ∅
@@ -408,6 +501,7 @@ export default function App() {
                             }
                           >
                             <QuestionCard
+                              key={userAccount.id}
                               question={currentQuestion}
                               currentIndex={currentIndex}
                               totalFiltered={filteredQuestions.length}
@@ -650,6 +744,7 @@ export default function App() {
             isOpen={isAppInfoOpen}
             onClose={() => setIsAppInfoOpen(false)}
             totalQuestions={questions.length}
+            currentMode={currentMode}
             isDevUser={isDevUser}
             onOpenDatabaseManager={() => setIsDatabaseManagerOpen(true)}
             onOpenShortcuts={() => setIsShortcutsOpen(true)}
@@ -670,6 +765,9 @@ export default function App() {
             onUpdateAccount={setUserAccount}
             stats={stats}
             onNavigateToMetrics={() => handleSelectMode('metrics')}
+            onDatabasesUpdated={(mergedDbs) => setDatabases(mergedDbs)}
+            onOpenBYOKModal={() => setIsBYOKModalOpen(true)}
+            onProfileChanged={reloadStudyProgress}
           />
         )}
 
@@ -698,9 +796,22 @@ export default function App() {
             answers={answers}
             questions={questions}
             currentQuestion={currentQuestion}
+            pendingQuote={pendingStriveQuote}
+            onConsumePendingQuote={() => setPendingStriveQuote(null)}
           />
         )}
       </React.Suspense>
+
+      {/* Floating Selection Ask Strive Popover */}
+      <SelectionAskPopover
+        onAskStrive={(selectedText) => {
+          setPendingStriveQuote({ text: selectedText, timestamp: Date.now() });
+          setIsGlobalAssistantOpen(true);
+        }}
+      />
+
+      {/* In-App Browser (WebView) Guard */}
+      <InAppBrowserGuard />
 
       {/* Full-Screen Blur Pause Overlay */}
       <PauseOverlay

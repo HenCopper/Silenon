@@ -168,7 +168,7 @@ export const DatabaseRow: React.FC<DatabaseRowProps> = ({
                 type="button"
                 onClick={() => onExport(db)}
                 className="p-1.5 text-muted hover:text-primary hover:bg-surface-subtle rounded transition-colors cursor-pointer"
-                title="Exportar JSON deste banco"
+                title="Baixar esta prova"
               >
                 <Download className="w-3.5 h-3.5" />
               </button>

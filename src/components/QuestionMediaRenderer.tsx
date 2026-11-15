@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { acquireMediaUrl, getCachedMediaUrlSync } from '../lib/mediaWindowCache';
 import { SmartQuestionImage } from './SmartQuestionImage';
 
@@ -11,7 +11,13 @@ export interface QuestionMediaRendererProps {
   lazy?: boolean;
 }
 
-function detectRenderKind(url: string, explicitType?: string): 'audio' | 'video' | 'svg' | 'image' {
+const svgMarkupCache = new Map<string, string>();
+const svgPreloadInFlight = new Map<string, Promise<string | null>>();
+
+export function detectMediaRenderKind(
+  url: string,
+  explicitType?: string
+): 'audio' | 'video' | 'svg' | 'image' {
   const t = (explicitType || '').toLowerCase().trim();
   if (t === 'audio' || t === 'áudio') return 'audio';
   if (t === 'video' || t === 'vídeo') return 'video';
@@ -39,6 +45,46 @@ function normalizeInlineSvg(rawSvg: string): string {
     .replace(/(stroke|fill|color)\s*:\s*black\b/gi, '$1:currentColor');
 }
 
+function getCachedSvgSync(url: string, resolvedUrl: string | null): string | null {
+  if (url && svgMarkupCache.has(url)) return svgMarkupCache.get(url) ?? null;
+  if (resolvedUrl && svgMarkupCache.has(resolvedUrl)) return svgMarkupCache.get(resolvedUrl) ?? null;
+  return null;
+}
+
+export function preloadSvgMarkup(resolvedUrl: string, rawUrl?: string): Promise<string | null> {
+  if (!resolvedUrl) return Promise.resolve(null);
+  const cached = getCachedSvgSync(rawUrl || resolvedUrl, resolvedUrl);
+  if (cached) return Promise.resolve(cached);
+
+  const key = rawUrl || resolvedUrl;
+  const inFlight = svgPreloadInFlight.get(key);
+  if (inFlight) return inFlight;
+
+  const promise = fetch(resolvedUrl)
+    .then((res) => {
+      if (!res.ok) throw new Error('Failed to load SVG');
+      return res.text();
+    })
+    .then((rawText) => {
+      if (!/<svg[\s>]/i.test(rawText)) return null;
+      const normalized = normalizeInlineSvg(rawText);
+      svgMarkupCache.set(resolvedUrl, normalized);
+      if (rawUrl) {
+        svgMarkupCache.set(rawUrl, normalized);
+      }
+      return normalized;
+    })
+    .catch(() => null)
+    .finally(() => {
+      svgPreloadInFlight.delete(key);
+    });
+
+  svgPreloadInFlight.set(key, promise);
+  return promise;
+}
+
+const SVG_GRAPHIC_SELECTOR = 'path, line, polyline, polygon, rect, circle, ellipse, text';
+
 export const QuestionMediaRenderer: React.FC<QuestionMediaRendererProps> = ({
   url,
   alt,
@@ -47,16 +93,41 @@ export const QuestionMediaRenderer: React.FC<QuestionMediaRendererProps> = ({
   className,
   lazy = false,
 }) => {
+  const kind = detectMediaRenderKind(url, type);
+  const svgContainerRef = useRef<HTMLDivElement | null>(null);
+
+  const [trackedKey, setTrackedKey] = useState<string>(`${kind}::${url}`);
   const [resolvedUrl, setResolvedUrl] = useState<string | null>(() => getCachedMediaUrlSync(url));
   const [isLoading, setIsLoading] = useState<boolean>(() => {
     if (!url || !url.trim()) return false;
     return getCachedMediaUrlSync(url) === null;
   });
   const [hasError, setHasError] = useState<boolean>(false);
-  const [svgMarkup, setSvgMarkup] = useState<string | null>(null);
-  const [isSvgLoading, setIsSvgLoading] = useState<boolean>(false);
+  const [svgMarkup, setSvgMarkup] = useState<string | null>(() => {
+    if (kind !== 'svg') return null;
+    const syncResolved = getCachedMediaUrlSync(url);
+    return getCachedSvgSync(url, syncResolved);
+  });
+  const [isSvgLoading, setIsSvgLoading] = useState<boolean>(() => {
+    if (kind !== 'svg') return false;
+    const syncResolved = getCachedMediaUrlSync(url);
+    return Boolean(syncResolved) && !getCachedSvgSync(url, syncResolved);
+  });
 
-  const kind = detectRenderKind(url, type);
+  // Synchronously resolve cached media URL and cached SVG markup when url/kind changes
+  const nextKey = `${kind}::${url}`;
+  if (trackedKey !== nextKey) {
+    setTrackedKey(nextKey);
+    const trimmed = url?.trim() || '';
+    const syncHit = trimmed ? getCachedMediaUrlSync(trimmed) : null;
+    const cachedSvg = kind === 'svg' && trimmed ? getCachedSvgSync(trimmed, syncHit) : null;
+
+    setResolvedUrl(syncHit);
+    setIsLoading(Boolean(trimmed) && syncHit === null && !cachedSvg);
+    setHasError(false);
+    setSvgMarkup(cachedSvg);
+    setIsSvgLoading(kind === 'svg' && Boolean(syncHit) && !cachedSvg);
+  }
 
   useEffect(() => {
     let active = true;
@@ -109,29 +180,30 @@ export const QuestionMediaRenderer: React.FC<QuestionMediaRendererProps> = ({
   useEffect(() => {
     let active = true;
 
-    if (kind !== 'svg' || !resolvedUrl) {
+    if (kind !== 'svg') {
+      setSvgMarkup(null);
+      setIsSvgLoading(false);
+      return;
+    }
+
+    const cached = getCachedSvgSync(url, resolvedUrl);
+    if (cached) {
+      setSvgMarkup(cached);
+      setIsSvgLoading(false);
+      return;
+    }
+
+    if (!resolvedUrl) {
       setSvgMarkup(null);
       setIsSvgLoading(false);
       return;
     }
 
     setIsSvgLoading(true);
-    fetch(resolvedUrl)
-      .then((res) => {
-        if (!res.ok) throw new Error('Failed to load SVG');
-        return res.text();
-      })
-      .then((rawText) => {
+    preloadSvgMarkup(resolvedUrl, url)
+      .then((normalized) => {
         if (!active) return;
-        if (/<svg[\s>]/i.test(rawText)) {
-          setSvgMarkup(normalizeInlineSvg(rawText));
-        } else {
-          setSvgMarkup(null);
-        }
-      })
-      .catch(() => {
-        if (!active) return;
-        setSvgMarkup(null);
+        setSvgMarkup(normalized);
       })
       .finally(() => {
         if (active) {
@@ -142,7 +214,72 @@ export const QuestionMediaRenderer: React.FC<QuestionMediaRendererProps> = ({
     return () => {
       active = false;
     };
-  }, [kind, resolvedUrl]);
+  }, [kind, resolvedUrl, url]);
+
+  // Trace-by-trace SVG animation (< 500ms total: max 350ms staggered delay + 120ms duration = 470ms)
+  useLayoutEffect(() => {
+    if (kind !== 'svg' || !svgMarkup || !svgContainerRef.current) return;
+    const svgEl = svgContainerRef.current.querySelector('svg');
+    if (!svgEl) return;
+
+    const elements = (
+      Array.from(svgEl.querySelectorAll(SVG_GRAPHIC_SELECTOR)) as SVGElement[]
+    ).filter((el) => !el.closest('defs, clipPath, mask, pattern, marker'));
+
+    const total = elements.length;
+    if (total === 0) return;
+
+    const cleanups: Array<() => void> = [];
+
+    elements.forEach((el, index) => {
+      const delayMs = Math.round((index / Math.max(1, total - 1)) * 350);
+      const tag = el.tagName.toLowerCase();
+      let strokeLen = 0;
+
+      if (tag !== 'text' && typeof (el as unknown as SVGGeometryElement).getTotalLength === 'function') {
+        try {
+          const measured = (el as unknown as SVGGeometryElement).getTotalLength();
+          if (Number.isFinite(measured) && measured > 0) {
+            strokeLen = measured;
+          }
+        } catch {
+          strokeLen = 0;
+        }
+      }
+
+      if (strokeLen > 0) {
+        const origInlineDashArray = el.style.strokeDasharray;
+        const origInlineDashOffset = el.style.strokeDashoffset;
+
+        el.style.setProperty('--svg-stroke-len', `${strokeLen}`);
+        el.style.strokeDasharray = `${strokeLen} ${strokeLen}`;
+        el.style.strokeDashoffset = `${strokeLen}`;
+        el.style.animation = `svg-stroke-draw 120ms ease-out ${delayMs}ms both`;
+
+        const handleAnimationEnd = () => {
+          el.style.strokeDasharray = origInlineDashArray;
+          el.style.strokeDashoffset = origInlineDashOffset;
+          el.style.animation = '';
+        };
+        el.addEventListener('animationend', handleAnimationEnd, { once: true });
+        cleanups.push(() => el.removeEventListener('animationend', handleAnimationEnd));
+      } else {
+        const hasExistingTransform = Boolean(el.getAttribute('transform') || el.style.transform);
+        const keyframeName = hasExistingTransform ? 'svg-element-fade' : 'svg-element-fade-up';
+        el.style.animation = `${keyframeName} 120ms ease-out ${delayMs}ms both`;
+
+        const handleAnimationEnd = () => {
+          el.style.animation = '';
+        };
+        el.addEventListener('animationend', handleAnimationEnd, { once: true });
+        cleanups.push(() => el.removeEventListener('animationend', handleAnimationEnd));
+      }
+    });
+
+    return () => {
+      cleanups.forEach((fn) => fn());
+    };
+  }, [kind, svgMarkup, url, resolvedUrl]);
 
   if (!url || !url.trim()) return null;
 
@@ -154,7 +291,7 @@ export const QuestionMediaRenderer: React.FC<QuestionMediaRendererProps> = ({
     );
   }
 
-  if (hasError || !resolvedUrl) {
+  if (hasError || (!resolvedUrl && !svgMarkup)) {
     return (
       <div className="w-full py-3 px-4 rounded-lg bg-surface-subtle border border-border text-xs text-muted italic text-center">
         {alt || 'Mídia indisponível no pacote local.'}
@@ -162,7 +299,7 @@ export const QuestionMediaRenderer: React.FC<QuestionMediaRendererProps> = ({
     );
   }
 
-  if (kind === 'audio') {
+  if (kind === 'audio' && resolvedUrl) {
     return (
       <div className={`w-full space-y-1.5 ${className || ''}`}>
         <audio controls preload="metadata" className="w-full" src={resolvedUrl} />
@@ -171,7 +308,7 @@ export const QuestionMediaRenderer: React.FC<QuestionMediaRendererProps> = ({
     );
   }
 
-  if (kind === 'video') {
+  if (kind === 'video' && resolvedUrl) {
     return (
       <div className={`w-full space-y-1.5 ${className || ''}`}>
         <video
@@ -189,6 +326,8 @@ export const QuestionMediaRenderer: React.FC<QuestionMediaRendererProps> = ({
   if (kind === 'svg' && svgMarkup) {
     return (
       <div
+        ref={svgContainerRef}
+        key={`${url}::${resolvedUrl || ''}`}
         role="img"
         aria-label={alt || 'Figura vetorial da questão'}
         className={`w-full flex items-center justify-center bg-transparent text-primary theme-text-primary [&_svg]:w-full [&_svg]:h-auto [&_svg]:max-h-96 [&_svg]:mx-auto [&_svg]:block ${className || ''}`}
@@ -196,6 +335,8 @@ export const QuestionMediaRenderer: React.FC<QuestionMediaRendererProps> = ({
       />
     );
   }
+
+  if (!resolvedUrl) return null;
 
   return (
     <SmartQuestionImage

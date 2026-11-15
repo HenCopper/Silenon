@@ -63,10 +63,188 @@ export const defaultUserAccount: UserAccount = {
 };
 
 export class LocalStorageManager {
+  private static getLegacyOwnerProfileId(): string {
+    try {
+      const profilesData = localStorage.getItem(STORAGE_KEYS.USER_PROFILES);
+      if (profilesData) {
+        const parsed = JSON.parse(profilesData);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          const initialLocal = parsed.find(
+            (p) => p?.id === 'user_main' || p?.id === 'local_default_user'
+          );
+          if (initialLocal?.id) return initialLocal.id;
+          if (parsed[0]?.id && typeof parsed[0].id === 'string') {
+            return parsed[0].id;
+          }
+        }
+      }
+      const accountData = localStorage.getItem(STORAGE_KEYS.USER_ACCOUNT);
+      if (accountData) {
+        const parsedAccount = JSON.parse(accountData);
+        if (parsedAccount?.id && typeof parsedAccount.id === 'string') {
+          return parsedAccount.id;
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return defaultUserAccount.id;
+  }
+
+  private static getActiveProfileId(): string {
+    try {
+      const data = localStorage.getItem(STORAGE_KEYS.USER_ACCOUNT);
+      if (data) {
+        const parsed = JSON.parse(data);
+        if (parsed?.id && typeof parsed.id === 'string' && parsed.id.trim()) {
+          return parsed.id;
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return defaultUserAccount.id;
+  }
+
+  private static ensureLegacyProgressMigrated(explicitOwnerProfileId?: string): void {
+    try {
+      const targetProfileId = explicitOwnerProfileId || this.getLegacyOwnerProfileId();
+      const legacyBaseKeys = [
+        STORAGE_KEYS.ANSWERS,
+        STORAGE_KEYS.SRS,
+        STORAGE_KEYS.BOOKMARKS,
+        STORAGE_KEYS.SIMULADOS,
+        STORAGE_KEYS.STATS,
+        STORAGE_KEYS.STRIKES,
+        STORAGE_KEYS.UNANSWERED_TIMES,
+      ];
+
+      for (const baseKey of legacyBaseKeys) {
+        const legacyVal = localStorage.getItem(baseKey);
+        if (legacyVal !== null) {
+          const scopedKey = `${baseKey}_${targetProfileId}`;
+          if (localStorage.getItem(scopedKey) === null) {
+            localStorage.setItem(scopedKey, legacyVal);
+          }
+          localStorage.removeItem(baseKey);
+        }
+      }
+
+      const lastQuestionPrefix = `${STORAGE_KEYS.LAST_QUESTION}_`;
+      const knownProfileIds = new Set<string>([
+        targetProfileId,
+        defaultUserAccount.id,
+        'local_default_user',
+        this.getActiveProfileId(),
+      ]);
+
+      try {
+        const profilesData = localStorage.getItem(STORAGE_KEYS.USER_PROFILES);
+        if (profilesData) {
+          const parsed = JSON.parse(profilesData);
+          if (Array.isArray(parsed)) {
+            for (const p of parsed) {
+              if (p?.id && typeof p.id === 'string') {
+                knownProfileIds.add(p.id);
+              }
+            }
+          }
+        }
+      } catch {
+        // ignore
+      }
+
+      const matchingKeys: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && key.startsWith(lastQuestionPrefix)) {
+          matchingKeys.push(key);
+        }
+      }
+
+      for (const key of matchingKeys) {
+        const suffix = key.slice(lastQuestionPrefix.length);
+        let alreadyScoped = false;
+        for (const pid of knownProfileIds) {
+          if (suffix.startsWith(`${pid}_`)) {
+            alreadyScoped = true;
+            break;
+          }
+        }
+        if (alreadyScoped) continue;
+
+        const val = localStorage.getItem(key);
+        if (val !== null) {
+          const targetKey = `${lastQuestionPrefix}${targetProfileId}_${suffix}`;
+          if (localStorage.getItem(targetKey) === null) {
+            localStorage.setItem(targetKey, val);
+          }
+          localStorage.removeItem(key);
+        }
+      }
+    } catch (e) {
+      console.warn('Error migrating legacy progress keys', e);
+    }
+  }
+
+  private static getProfileProgressKey(baseKey: string): string {
+    this.ensureLegacyProgressMigrated();
+    return `${baseKey}_${this.getActiveProfileId()}`;
+  }
+
+  private static getLastQuestionKey(databaseId: string = 'all'): string {
+    this.ensureLegacyProgressMigrated();
+    return `${STORAGE_KEYS.LAST_QUESTION}_${this.getActiveProfileId()}_${databaseId}`;
+  }
+
+  static copyProfileProgressIfEmpty(fromProfileId: string, toProfileId: string): void {
+    if (!fromProfileId || !toProfileId || fromProfileId === toProfileId) return;
+    try {
+      this.ensureLegacyProgressMigrated(fromProfileId);
+      const simpleKeys = [
+        STORAGE_KEYS.ANSWERS,
+        STORAGE_KEYS.SRS,
+        STORAGE_KEYS.BOOKMARKS,
+        STORAGE_KEYS.SIMULADOS,
+        STORAGE_KEYS.STATS,
+        STORAGE_KEYS.STRIKES,
+        STORAGE_KEYS.UNANSWERED_TIMES,
+      ];
+      for (const baseKey of simpleKeys) {
+        const sourceKey = `${baseKey}_${fromProfileId}`;
+        const destKey = `${baseKey}_${toProfileId}`;
+        const sourceVal = localStorage.getItem(sourceKey);
+        if (sourceVal !== null && localStorage.getItem(destKey) === null) {
+          localStorage.setItem(destKey, sourceVal);
+        }
+      }
+
+      const sourcePrefix = `${STORAGE_KEYS.LAST_QUESTION}_${fromProfileId}_`;
+      const destPrefix = `${STORAGE_KEYS.LAST_QUESTION}_${toProfileId}_`;
+      const keysToCopy: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && key.startsWith(sourcePrefix)) {
+          keysToCopy.push(key);
+        }
+      }
+      for (const sourceKey of keysToCopy) {
+        const dbSuffix = sourceKey.slice(sourcePrefix.length);
+        const destKey = `${destPrefix}${dbSuffix}`;
+        const val = localStorage.getItem(sourceKey);
+        if (val !== null && localStorage.getItem(destKey) === null) {
+          localStorage.setItem(destKey, val);
+        }
+      }
+    } catch (e) {
+      console.warn('Error copying profile progress', e);
+    }
+  }
+
   // Answers History
   static getAnswers(): Record<number, UserAnswerRecord[]> {
     try {
-      const data = localStorage.getItem(STORAGE_KEYS.ANSWERS);
+      const data = localStorage.getItem(this.getProfileProgressKey(STORAGE_KEYS.ANSWERS));
       return data ? JSON.parse(data) : {};
     } catch {
       return {};
@@ -88,7 +266,7 @@ export class LocalStorageManager {
     }
 
     try {
-      localStorage.setItem(STORAGE_KEYS.ANSWERS, JSON.stringify(answers));
+      localStorage.setItem(this.getProfileProgressKey(STORAGE_KEYS.ANSWERS), JSON.stringify(answers));
     } catch (e) {
       console.warn('LocalStorage save error', e);
     }
@@ -98,7 +276,7 @@ export class LocalStorageManager {
   // SRS Items
   static getSRSItems(): Record<number, SRSItem> {
     try {
-      const data = localStorage.getItem(STORAGE_KEYS.SRS);
+      const data = localStorage.getItem(this.getProfileProgressKey(STORAGE_KEYS.SRS));
       return data ? JSON.parse(data) : {};
     } catch {
       return {};
@@ -117,7 +295,7 @@ export class LocalStorageManager {
     }
 
     try {
-      localStorage.setItem(STORAGE_KEYS.SRS, JSON.stringify(items));
+      localStorage.setItem(this.getProfileProgressKey(STORAGE_KEYS.SRS), JSON.stringify(items));
     } catch (e) {
       console.warn('LocalStorage save error', e);
     }
@@ -127,7 +305,7 @@ export class LocalStorageManager {
   // Bookmarks
   static getBookmarks(): Record<number, UserBookmark> {
     try {
-      const data = localStorage.getItem(STORAGE_KEYS.BOOKMARKS);
+      const data = localStorage.getItem(this.getProfileProgressKey(STORAGE_KEYS.BOOKMARKS));
       return data ? JSON.parse(data) : {};
     } catch {
       return {};
@@ -153,7 +331,7 @@ export class LocalStorageManager {
     }
 
     try {
-      localStorage.setItem(STORAGE_KEYS.BOOKMARKS, JSON.stringify(bookmarks));
+      localStorage.setItem(this.getProfileProgressKey(STORAGE_KEYS.BOOKMARKS), JSON.stringify(bookmarks));
     } catch (e) {
       console.warn('LocalStorage save error', e);
     }
@@ -178,7 +356,7 @@ export class LocalStorageManager {
     }
 
     try {
-      localStorage.setItem(STORAGE_KEYS.BOOKMARKS, JSON.stringify(bookmarks));
+      localStorage.setItem(this.getProfileProgressKey(STORAGE_KEYS.BOOKMARKS), JSON.stringify(bookmarks));
     } catch (e) {
       console.warn('LocalStorage save error', e);
     }
@@ -188,7 +366,7 @@ export class LocalStorageManager {
   // Option strikethroughs (temporary/persistent)
   static getOptionStrikes(): Record<number, string[]> {
     try {
-      const data = localStorage.getItem(STORAGE_KEYS.STRIKES);
+      const data = localStorage.getItem(this.getProfileProgressKey(STORAGE_KEYS.STRIKES));
       return data ? JSON.parse(data) : {};
     } catch {
       return {};
@@ -207,7 +385,7 @@ export class LocalStorageManager {
     }
 
     try {
-      localStorage.setItem(STORAGE_KEYS.STRIKES, JSON.stringify(strikes));
+      localStorage.setItem(this.getProfileProgressKey(STORAGE_KEYS.STRIKES), JSON.stringify(strikes));
     } catch (e) {
       console.warn('LocalStorage save error', e);
     }
@@ -222,7 +400,7 @@ export class LocalStorageManager {
     }
 
     try {
-      localStorage.setItem(STORAGE_KEYS.STRIKES, JSON.stringify(strikes));
+      localStorage.setItem(this.getProfileProgressKey(STORAGE_KEYS.STRIKES), JSON.stringify(strikes));
     } catch (e) {
       console.warn('LocalStorage save error', e);
     }
@@ -230,10 +408,23 @@ export class LocalStorageManager {
   }
 
   // User Statistics & XP
-  static getStatistics(): UserStatistics {
+  static getStatistics(profileId?: string): UserStatistics {
     try {
-      const data = localStorage.getItem(STORAGE_KEYS.STATS);
-      if (!data) return defaultStatistics;
+      let statsKey: string;
+      if (profileId) {
+        this.ensureLegacyProgressMigrated();
+        statsKey = `${STORAGE_KEYS.STATS}_${profileId}`;
+      } else {
+        statsKey = this.getProfileProgressKey(STORAGE_KEYS.STATS);
+      }
+      const data = localStorage.getItem(statsKey);
+      if (!data) {
+        return {
+          ...defaultStatistics,
+          last_study_date: getTodayDateString(),
+          subject_stats: {},
+        };
+      }
       const stats: UserStatistics = JSON.parse(data);
       
       // Ensure daily_goal_xp and today_xp have valid numbers
@@ -242,6 +433,9 @@ export class LocalStorageManager {
       }
       if (typeof stats.today_xp !== 'number') {
         stats.today_xp = stats.xp_points || 0;
+      }
+      if (!stats.subject_stats || typeof stats.subject_stats !== 'object') {
+        stats.subject_stats = {};
       }
 
       // Check day rollover for streak
@@ -266,13 +460,17 @@ export class LocalStorageManager {
       }
       return stats;
     } catch {
-      return defaultStatistics;
+      return {
+        ...defaultStatistics,
+        last_study_date: getTodayDateString(),
+        subject_stats: {},
+      };
     }
   }
 
   static saveStatistics(stats: UserStatistics): UserStatistics {
     try {
-      localStorage.setItem(STORAGE_KEYS.STATS, JSON.stringify(stats));
+      localStorage.setItem(this.getProfileProgressKey(STORAGE_KEYS.STATS), JSON.stringify(stats));
     } catch (e) {
       console.warn('LocalStorage save error', e);
     }
@@ -283,7 +481,7 @@ export class LocalStorageManager {
     const stats = this.getStatistics();
     stats.daily_goal_xp = Math.max(10, Math.min(500, goal));
     try {
-      localStorage.setItem(STORAGE_KEYS.STATS, JSON.stringify(stats));
+      localStorage.setItem(this.getProfileProgressKey(STORAGE_KEYS.STATS), JSON.stringify(stats));
     } catch (e) {
       console.warn('LocalStorage save error', e);
     }
@@ -309,7 +507,7 @@ export class LocalStorageManager {
     if (isCorrect) stats.subject_stats[subject].correct += 1;
 
     try {
-      localStorage.setItem(STORAGE_KEYS.STATS, JSON.stringify(stats));
+      localStorage.setItem(this.getProfileProgressKey(STORAGE_KEYS.STATS), JSON.stringify(stats));
     } catch (e) {
       console.warn('LocalStorage save error', e);
     }
@@ -372,7 +570,11 @@ export class LocalStorageManager {
         return initialList;
       }
 
-      // Initialize with default bank
+      // Initialize with default bank only when explicit default questions exist
+      if (!defaultQuestions || defaultQuestions.length === 0) {
+        return [];
+      }
+
       const defaultDb: QuestionDatabase = {
         id: 'default_main',
         name: 'Principal',
@@ -404,7 +606,7 @@ export class LocalStorageManager {
    * Adds a new database and re-indexes questions with collision-free sequence_ids
    */
   static addDatabase(
-    newDb: { name: string; filename?: string; databaseId?: string; questions: Question[] },
+    newDb: { name: string; filename?: string; databaseId?: string; questions: Question[]; isDefault?: boolean },
     existingDatabases: QuestionDatabase[]
   ): { updatedDatabases: QuestionDatabase[]; newDatabaseId: string } {
     // 1. Calculate max sequence_id across existing questions AND existing stored answer/SRS records
@@ -445,12 +647,29 @@ export class LocalStorageManager {
       filename: newDb.filename,
       questions: normalizedQuestions,
       created_at: Date.now(),
-      is_default: false,
+      is_default: Boolean(newDb.isDefault),
     };
 
     const updated = [...existingDatabases, createdDatabase];
     this.saveDatabases(updated);
     return { updatedDatabases: updated, newDatabaseId: dbId };
+  }
+
+  static getActiveDatabaseId(): string | 'all' {
+    try {
+      const value = localStorage.getItem(STORAGE_KEYS.ACTIVE_DB);
+      return value && value.trim() ? value : 'all';
+    } catch {
+      return 'all';
+    }
+  }
+
+  static saveActiveDatabaseId(databaseId: string | 'all'): void {
+    try {
+      localStorage.setItem(STORAGE_KEYS.ACTIVE_DB, databaseId);
+    } catch (e) {
+      console.warn('LocalStorage save error', e);
+    }
   }
 
   static renameDatabase(
@@ -509,7 +728,7 @@ export class LocalStorageManager {
   // Simulados
   static getSimulados(): SimuladoResult[] {
     try {
-      const data = localStorage.getItem(STORAGE_KEYS.SIMULADOS);
+      const data = localStorage.getItem(this.getProfileProgressKey(STORAGE_KEYS.SIMULADOS));
       return data ? JSON.parse(data) : [];
     } catch {
       return [];
@@ -520,7 +739,7 @@ export class LocalStorageManager {
     const list = this.getSimulados();
     list.unshift(result);
     try {
-      localStorage.setItem(STORAGE_KEYS.SIMULADOS, JSON.stringify(list));
+      localStorage.setItem(this.getProfileProgressKey(STORAGE_KEYS.SIMULADOS), JSON.stringify(list));
     } catch (e) {
       console.warn('LocalStorage save error', e);
     }
@@ -530,7 +749,7 @@ export class LocalStorageManager {
   // Full System Export & Import (100% Offline Disk Portability)
   static exportFullBackup(databases: QuestionDatabase[], questions: Question[]): string {
     const backup = {
-      app: 'Memoriz Offline Questions & SRS',
+      app: 'Silenon',
       version: '1.0.2',
       exported_at: new Date().toISOString(),
       databases: databases,
@@ -555,11 +774,11 @@ export class LocalStorageManager {
       const data = JSON.parse(jsonString);
       if (data.databases && Array.isArray(data.databases) && data.databases.length > 0) {
         this.saveDatabases(data.databases);
-        if (data.answers) localStorage.setItem(STORAGE_KEYS.ANSWERS, JSON.stringify(data.answers));
-        if (data.srs_items) localStorage.setItem(STORAGE_KEYS.SRS, JSON.stringify(data.srs_items));
-        if (data.bookmarks) localStorage.setItem(STORAGE_KEYS.BOOKMARKS, JSON.stringify(data.bookmarks));
-        if (data.statistics) localStorage.setItem(STORAGE_KEYS.STATS, JSON.stringify(data.statistics));
-        if (data.simulados) localStorage.setItem(STORAGE_KEYS.SIMULADOS, JSON.stringify(data.simulados));
+        if (data.answers) localStorage.setItem(this.getProfileProgressKey(STORAGE_KEYS.ANSWERS), JSON.stringify(data.answers));
+        if (data.srs_items) localStorage.setItem(this.getProfileProgressKey(STORAGE_KEYS.SRS), JSON.stringify(data.srs_items));
+        if (data.bookmarks) localStorage.setItem(this.getProfileProgressKey(STORAGE_KEYS.BOOKMARKS), JSON.stringify(data.bookmarks));
+        if (data.statistics) localStorage.setItem(this.getProfileProgressKey(STORAGE_KEYS.STATS), JSON.stringify(data.statistics));
+        if (data.simulados) localStorage.setItem(this.getProfileProgressKey(STORAGE_KEYS.SIMULADOS), JSON.stringify(data.simulados));
         if (data.preferences) localStorage.setItem(STORAGE_KEYS.PREFS, JSON.stringify(data.preferences));
 
         const allQ = this.getAllQuestions(data.databases);
@@ -570,11 +789,11 @@ export class LocalStorageManager {
           questions: allQ,
         };
       } else if (data.question_bank && Array.isArray(data.question_bank)) {
-        if (data.answers) localStorage.setItem(STORAGE_KEYS.ANSWERS, JSON.stringify(data.answers));
-        if (data.srs_items) localStorage.setItem(STORAGE_KEYS.SRS, JSON.stringify(data.srs_items));
-        if (data.bookmarks) localStorage.setItem(STORAGE_KEYS.BOOKMARKS, JSON.stringify(data.bookmarks));
-        if (data.statistics) localStorage.setItem(STORAGE_KEYS.STATS, JSON.stringify(data.statistics));
-        if (data.simulados) localStorage.setItem(STORAGE_KEYS.SIMULADOS, JSON.stringify(data.simulados));
+        if (data.answers) localStorage.setItem(this.getProfileProgressKey(STORAGE_KEYS.ANSWERS), JSON.stringify(data.answers));
+        if (data.srs_items) localStorage.setItem(this.getProfileProgressKey(STORAGE_KEYS.SRS), JSON.stringify(data.srs_items));
+        if (data.bookmarks) localStorage.setItem(this.getProfileProgressKey(STORAGE_KEYS.BOOKMARKS), JSON.stringify(data.bookmarks));
+        if (data.statistics) localStorage.setItem(this.getProfileProgressKey(STORAGE_KEYS.STATS), JSON.stringify(data.statistics));
+        if (data.simulados) localStorage.setItem(this.getProfileProgressKey(STORAGE_KEYS.SIMULADOS), JSON.stringify(data.simulados));
         if (data.preferences) localStorage.setItem(STORAGE_KEYS.PREFS, JSON.stringify(data.preferences));
         
         const singleDb: QuestionDatabase = {
@@ -622,13 +841,13 @@ export class LocalStorageManager {
   }
 
   static resetAllProgress(): void {
-    localStorage.removeItem(STORAGE_KEYS.ANSWERS);
-    localStorage.removeItem(STORAGE_KEYS.SRS);
-    localStorage.removeItem(STORAGE_KEYS.BOOKMARKS);
-    localStorage.removeItem(STORAGE_KEYS.STATS);
-    localStorage.removeItem(STORAGE_KEYS.SIMULADOS);
-    localStorage.removeItem(STORAGE_KEYS.STRIKES);
-    localStorage.removeItem(STORAGE_KEYS.UNANSWERED_TIMES);
+    localStorage.removeItem(this.getProfileProgressKey(STORAGE_KEYS.ANSWERS));
+    localStorage.removeItem(this.getProfileProgressKey(STORAGE_KEYS.SRS));
+    localStorage.removeItem(this.getProfileProgressKey(STORAGE_KEYS.BOOKMARKS));
+    localStorage.removeItem(this.getProfileProgressKey(STORAGE_KEYS.STATS));
+    localStorage.removeItem(this.getProfileProgressKey(STORAGE_KEYS.SIMULADOS));
+    localStorage.removeItem(this.getProfileProgressKey(STORAGE_KEYS.STRIKES));
+    localStorage.removeItem(this.getProfileProgressKey(STORAGE_KEYS.UNANSWERED_TIMES));
   }
 
   // User Account & Multi-Profile System
@@ -645,11 +864,17 @@ export class LocalStorageManager {
     } catch (e) {
       console.warn('Error reading user account', e);
     }
-    return defaultUserAccount;
+    return { ...defaultUserAccount };
   }
 
   static saveUserAccount(account: UserAccount): UserAccount {
     try {
+      // Migrate any legacy unsuffixed progress to the initial profile BEFORE switching active account
+      this.ensureLegacyProgressMigrated();
+
+      // Read existing profiles BEFORE writing USER_ACCOUNT so the previous profile is preserved
+      const profiles = this.getUserProfiles();
+
       const updated = {
         ...account,
         lastLoginAt: new Date().toISOString(),
@@ -657,7 +882,6 @@ export class LocalStorageManager {
       localStorage.setItem(STORAGE_KEYS.USER_ACCOUNT, JSON.stringify(updated));
 
       // Also ensure this account is updated in profiles list
-      const profiles = this.getUserProfiles();
       const existingIdx = profiles.findIndex(p => p.id === updated.id);
       if (existingIdx >= 0) {
         profiles[existingIdx] = updated;
@@ -670,6 +894,49 @@ export class LocalStorageManager {
     } catch (e) {
       console.warn('Error saving user account', e);
       return account;
+    }
+  }
+
+  static updateUserProfile(account: UserAccount): {
+    savedAccount: UserAccount;
+    profiles: UserAccount[];
+    isActiveProfile: boolean;
+  } {
+    try {
+      this.ensureLegacyProgressMigrated();
+      const profiles = this.getUserProfiles();
+      const activeAccount = this.getUserAccount();
+      const isActiveProfile = account.id === activeAccount.id;
+
+      const updated: UserAccount = {
+        ...account,
+        lastLoginAt: isActiveProfile ? new Date().toISOString() : account.lastLoginAt,
+      };
+
+      const existingIdx = profiles.findIndex(p => p.id === updated.id);
+      if (existingIdx >= 0) {
+        profiles[existingIdx] = updated;
+      } else {
+        profiles.push(updated);
+      }
+      localStorage.setItem(STORAGE_KEYS.USER_PROFILES, JSON.stringify(profiles));
+
+      if (isActiveProfile) {
+        localStorage.setItem(STORAGE_KEYS.USER_ACCOUNT, JSON.stringify(updated));
+      }
+
+      return {
+        savedAccount: updated,
+        profiles,
+        isActiveProfile,
+      };
+    } catch (e) {
+      console.warn('Error updating user profile', e);
+      return {
+        savedAccount: account,
+        profiles: this.getUserProfiles(),
+        isActiveProfile: false,
+      };
     }
   }
 
@@ -690,6 +957,7 @@ export class LocalStorageManager {
   }
 
   static switchUserProfile(profileId: string): UserAccount {
+    this.ensureLegacyProgressMigrated();
     const profiles = this.getUserProfiles();
     const target = profiles.find(p => p.id === profileId);
     if (target) {
@@ -699,12 +967,48 @@ export class LocalStorageManager {
     return this.getUserAccount();
   }
 
+  static clearProfileProgress(profileId: string): void {
+    try {
+      const simpleKeys = [
+        STORAGE_KEYS.ANSWERS,
+        STORAGE_KEYS.SRS,
+        STORAGE_KEYS.BOOKMARKS,
+        STORAGE_KEYS.SIMULADOS,
+        STORAGE_KEYS.STATS,
+        STORAGE_KEYS.STRIKES,
+        STORAGE_KEYS.UNANSWERED_TIMES,
+      ];
+      for (const baseKey of simpleKeys) {
+        localStorage.removeItem(`${baseKey}_${profileId}`);
+      }
+      localStorage.removeItem(`silenon_loading_tips_stock_v1_${profileId}`);
+      localStorage.removeItem(`silenon_loading_tips_meta_v1_${profileId}`);
+
+      const lastQuestionPrefix = `${STORAGE_KEYS.LAST_QUESTION}_${profileId}_`;
+      const keysToRemove: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && key.startsWith(lastQuestionPrefix)) {
+          keysToRemove.push(key);
+        }
+      }
+      for (const key of keysToRemove) {
+        localStorage.removeItem(key);
+      }
+    } catch (e) {
+      console.warn('Error clearing profile progress', e);
+    }
+  }
+
   static deleteUserProfile(profileId: string): UserAccount[] {
     let profiles = this.getUserProfiles();
     if (profiles.length <= 1) return profiles; // cannot delete sole profile
 
     profiles = profiles.filter(p => p.id !== profileId);
     localStorage.setItem(STORAGE_KEYS.USER_PROFILES, JSON.stringify(profiles));
+
+    // Remove isolated progress keys for the deleted profile
+    this.clearProfileProgress(profileId);
 
     // If active profile was deleted, switch to the first remaining
     const current = this.getUserAccount();
@@ -716,7 +1020,7 @@ export class LocalStorageManager {
 
   static getLastQuestionIndex(databaseId: string = 'all'): number {
     try {
-      const raw = localStorage.getItem(`${STORAGE_KEYS.LAST_QUESTION}_${databaseId}`);
+      const raw = localStorage.getItem(this.getLastQuestionKey(databaseId));
       const idx = raw !== null ? Number(raw) : 0;
       return !isNaN(idx) && idx >= 0 ? idx : 0;
     } catch {
@@ -726,7 +1030,7 @@ export class LocalStorageManager {
 
   static saveLastQuestionIndex(databaseId: string = 'all', index: number): void {
     try {
-      localStorage.setItem(`${STORAGE_KEYS.LAST_QUESTION}_${databaseId}`, String(index));
+      localStorage.setItem(this.getLastQuestionKey(databaseId), String(index));
     } catch (e) {
       console.warn('Erro ao salvar índice da questão', e);
     }
@@ -734,7 +1038,7 @@ export class LocalStorageManager {
 
   static getUnansweredTimes(): Record<number, number> {
     try {
-      const data = localStorage.getItem(STORAGE_KEYS.UNANSWERED_TIMES);
+      const data = localStorage.getItem(this.getProfileProgressKey(STORAGE_KEYS.UNANSWERED_TIMES));
       return data ? JSON.parse(data) : {};
     } catch {
       return {};
@@ -745,7 +1049,7 @@ export class LocalStorageManager {
     try {
       const times = this.getUnansweredTimes();
       times[questionId] = seconds;
-      localStorage.setItem(STORAGE_KEYS.UNANSWERED_TIMES, JSON.stringify(times));
+      localStorage.setItem(this.getProfileProgressKey(STORAGE_KEYS.UNANSWERED_TIMES), JSON.stringify(times));
     } catch (e) {
       console.warn('Erro ao salvar tempo da questão', e);
     }
@@ -756,7 +1060,7 @@ export class LocalStorageManager {
       const times = this.getUnansweredTimes();
       if (times[questionId] !== undefined) {
         delete times[questionId];
-        localStorage.setItem(STORAGE_KEYS.UNANSWERED_TIMES, JSON.stringify(times));
+        localStorage.setItem(this.getProfileProgressKey(STORAGE_KEYS.UNANSWERED_TIMES), JSON.stringify(times));
       }
     } catch (e) {
       console.warn('Erro ao limpar tempo da questão', e);

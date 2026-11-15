@@ -1,8 +1,51 @@
-import { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { StudyMode } from '../types/question';
 import { runCarouselDiagnostic } from '../lib/carouselDiagnosticProbe';
+import { useHorizontalCarousel } from './useHorizontalCarousel';
 
 export const MODE_KEYS: StudyMode[] = ['practice', 'srs', 'error_notebook', 'simulado', 'metrics'];
+export const LAST_ACTIVE_MODE_STORAGE_KEY = 'silenon_last_active_mode_v1';
+
+export function parseSavedStudyMode(raw: string | null | undefined): StudyMode | null {
+  if (!raw) return null;
+  const normalized = raw.trim().toLowerCase();
+  switch (normalized) {
+    case 'practice':
+    case 'pratica':
+    case 'prática':
+      return 'practice';
+    case 'srs':
+    case 'fixacao':
+    case 'fixação':
+      return 'srs';
+    case 'error_notebook':
+    case 'erros':
+      return 'error_notebook';
+    case 'simulado':
+      return 'simulado';
+    case 'metrics':
+    case 'metricas':
+    case 'métricas':
+      return 'metrics';
+    default:
+      return null;
+  }
+}
+
+export function saveLastActiveStudyMode(mode: StudyMode | string): void {
+  const parsed = parseSavedStudyMode(mode);
+  if (typeof window === 'undefined' || !parsed) return;
+  try {
+    sessionStorage.setItem(LAST_ACTIVE_MODE_STORAGE_KEY, parsed);
+  } catch {
+    // Ignore sessionStorage errors
+  }
+  try {
+    localStorage.setItem(LAST_ACTIVE_MODE_STORAGE_KEY, parsed);
+  } catch {
+    // Ignore localStorage errors
+  }
+}
 
 interface UseStudyCarouselOptions {
   isDevEnvironment: boolean;
@@ -17,28 +60,39 @@ export function useStudyCarousel({
   const [currentMode, setCurrentMode] = useState<StudyMode>(() => {
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search);
+      const modeParam = params.get('mode');
       if (
         isDevEnvironment &&
-        (params.get('mode') === 'dev' ||
+        (modeParam === 'dev' ||
           params.get('dev') === '1' ||
-          params.get('mode') === 'kitchen_sink')
+          modeParam === 'kitchen_sink')
       ) {
         return 'kitchen_sink';
+      }
+      const fromQuery = parseSavedStudyMode(modeParam);
+      if (fromQuery) {
+        return fromQuery;
+      }
+      try {
+        const fromSession = parseSavedStudyMode(
+          sessionStorage.getItem(LAST_ACTIVE_MODE_STORAGE_KEY)
+        );
+        if (fromSession) return fromSession;
+      } catch {
+        // Ignore sessionStorage read error
+      }
+      try {
+        const fromLocal = parseSavedStudyMode(
+          localStorage.getItem(LAST_ACTIVE_MODE_STORAGE_KEY)
+        );
+        if (fromLocal) return fromLocal;
+      } catch {
+        // Ignore localStorage read error
       }
     }
     return 'practice';
   });
 
-  const [modeDragProgress, setModeDragProgress] = useState<{
-    activeIndex: number;
-    offsetFraction: number;
-    isDragging: boolean;
-  } | null>(null);
-
-  const [isModeTransitioning, setIsModeTransitioning] = useState<boolean>(false);
-  const [containerWidth, setContainerWidth] = useState<number>(0);
-
-  const carouselContainerRef = useRef<HTMLDivElement>(null);
   const rightVeilRef = useRef<HTMLDivElement>(null);
   const slideRefs = useRef<(HTMLDivElement | null)[]>([]);
   const currentModeRef = useRef<StudyMode>(currentMode);
@@ -47,47 +101,53 @@ export function useStudyCarousel({
   const onBeforeModeChangeRef = useRef(onBeforeModeChange);
   onBeforeModeChangeRef.current = onBeforeModeChange;
 
-  const handleSelectMode = useCallback((newMode: StudyMode) => {
-    setModeDragProgress(null);
-    if (newMode === currentModeRef.current) return;
-    if (onBeforeModeChangeRef.current) {
-      onBeforeModeChangeRef.current(currentModeRef.current);
-    }
-    setIsModeTransitioning(true);
-    setCurrentMode(newMode);
-  }, []);
+  const isCarouselMode = MODE_KEYS.includes(currentMode);
+  const activeModeIndex = Math.max(0, MODE_KEYS.indexOf(currentMode));
 
-  useEffect(() => {
-    if (!isModeTransitioning) return;
-    const timer = window.setTimeout(() => {
-      setIsModeTransitioning(false);
-    }, 320);
-    return () => window.clearTimeout(timer);
-  }, [isModeTransitioning, currentMode]);
-
-  const handleModeDragProgress = useCallback(
-    (dragProgress: { activeIndex: number; offsetFraction: number; isDragging: boolean }) => {
-      if (dragProgress.isDragging) {
-        if (!modeDragProgress?.isDragging && onBeforeModeChangeRef.current) {
-          onBeforeModeChangeRef.current(currentModeRef.current);
-        }
-        setModeDragProgress(dragProgress);
-      } else {
-        setModeDragProgress(null);
+  const {
+    dragProgress: modeDragProgress,
+    setDragProgress: setModeDragProgress,
+    handleDragProgress: handleModeDragProgress,
+    isTransitioning: isModeTransitioning,
+    setIsTransitioning: setIsModeTransitioning,
+    isDragging,
+    carouselContainerRef,
+    containerWidth,
+    continuousPos,
+    pixelOffset,
+    slideWidthStyle,
+    trackWidthStyle,
+  } = useHorizontalCarousel({
+    itemCount: MODE_KEYS.length,
+    activeIndex: activeModeIndex,
+    enableContentSwipe: false,
+    transitionDurationMs: 320,
+    measureDeps: [currentMode],
+    onBeforeIndexChange: () => {
+      if (onBeforeModeChangeRef.current) {
+        onBeforeModeChangeRef.current(currentModeRef.current);
       }
     },
-    [modeDragProgress?.isDragging]
-  );
+    onIndexChange: (newIndex) => {
+      const targetMode = MODE_KEYS[newIndex];
+      if (targetMode) {
+        setCurrentMode(targetMode);
+      }
+    },
+  });
 
-  // Synchronous initial width measurement
-  useLayoutEffect(() => {
-    const container = carouselContainerRef.current;
-    if (!container) return;
-    const w = Math.round(container.getBoundingClientRect().width || container.clientWidth || 0);
-    if (w > 0) {
-      setContainerWidth(w);
-    }
-  }, []);
+  const handleSelectMode = useCallback(
+    (newMode: StudyMode) => {
+      setModeDragProgress(null);
+      if (newMode === currentModeRef.current) return;
+      if (onBeforeModeChangeRef.current) {
+        onBeforeModeChangeRef.current(currentModeRef.current);
+      }
+      setIsModeTransitioning(true);
+      setCurrentMode(newMode);
+    },
+    [setIsModeTransitioning, setModeDragProgress]
+  );
 
   // Diagnostic tool integration in development mode
   useEffect(() => {
@@ -103,76 +163,24 @@ export function useStudyCarousel({
       }
     }, 400);
     return () => clearTimeout(timer);
-  }, [containerWidth, currentMode, isDevEnvironment]);
+  }, [containerWidth, currentMode, isDevEnvironment, carouselContainerRef]);
 
-  // Measure only container width for horizontal track positioning
-  useEffect(() => {
-    const container = carouselContainerRef.current;
-    if (!container) return;
-
-    const updateWidth = () => {
-      const w = Math.round(container.getBoundingClientRect().width || container.clientWidth || 0);
-      if (w > 0) {
-        setContainerWidth((prev) => (prev !== w ? w : prev));
-      }
-    };
-
-    updateWidth();
-
-    let resizeObserver: ResizeObserver | null = null;
-    if (typeof ResizeObserver !== 'undefined') {
-      resizeObserver = new ResizeObserver(() => {
-        updateWidth();
-      });
-      resizeObserver.observe(container);
-    }
-
-    window.addEventListener('resize', updateWidth, { passive: true });
-    if (window.visualViewport) {
-      window.visualViewport.addEventListener('resize', updateWidth, { passive: true });
-    }
-
-    return () => {
-      if (resizeObserver) resizeObserver.disconnect();
-      window.removeEventListener('resize', updateWidth);
-      if (window.visualViewport) {
-        window.visualViewport.removeEventListener('resize', updateWidth);
-      }
-    };
-  }, [currentMode]);
-
-  // Sync mode with URL query parameter
+  // Sync mode with URL query parameter and persist active study mode
   useEffect(() => {
     if (typeof window !== 'undefined') {
+      if (MODE_KEYS.includes(currentMode)) {
+        saveLastActiveStudyMode(currentMode);
+      }
       const url = new URL(window.location.href);
       if (currentMode === 'kitchen_sink') {
         url.searchParams.set('mode', 'kitchen_sink');
         window.history.replaceState(null, '', url.toString());
-      } else if (url.searchParams.get('mode') === 'kitchen_sink') {
+      } else if (url.searchParams.has('mode')) {
         url.searchParams.delete('mode');
         window.history.replaceState(null, '', url.pathname + (url.search ? url.search : ''));
       }
     }
   }, [currentMode]);
-
-  // Horizontal layout calculations
-  const isCarouselMode = MODE_KEYS.includes(currentMode);
-  const activeModeIndex = Math.max(0, MODE_KEYS.indexOf(currentMode));
-
-  const continuousPos = modeDragProgress?.isDragging
-    ? Math.max(
-        0,
-        Math.min(
-          MODE_KEYS.length - 1,
-          modeDragProgress.activeIndex + modeDragProgress.offsetFraction
-        )
-      )
-    : activeModeIndex;
-
-  const isDragging = !!modeDragProgress?.isDragging;
-  const pixelOffset = containerWidth > 0 ? -Math.round(continuousPos * containerWidth) : 0;
-  const slideWidthStyle = containerWidth > 0 ? `${containerWidth}px` : '100%';
-  const trackWidthStyle = containerWidth > 0 ? `${MODE_KEYS.length * containerWidth}px` : '500%';
 
   return {
     currentMode,

@@ -54,7 +54,7 @@ export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({
           id="pwa-install-sidebar-btn"
           onClick={handleClick}
           className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-xs font-semibold theme-badge-accent hover:opacity-95 transition-all cursor-pointer shadow-xs text-left"
-          title="Instalar Silenon na tela inicial (Modo Standalone)"
+          title="Instalar Silenon no Aparelho"
         >
           <div className="p-1 rounded-md bg-accent-subtle shrink-0">
             <Smartphone className="w-4 h-4" />
@@ -85,10 +85,10 @@ export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({
                 </div>
                 <div>
                   <h3 className="text-base font-bold text-primary theme-text-primary">
-                    Instalar Silenon (PWA)
+                    Instalar Silenon no Aparelho
                   </h3>
                   <p className="text-xs text-secondary theme-text-secondary">
-                    Modo tela cheia nativo (standalone)
+                    Tela cheia sem barra de endereço
                   </p>
                 </div>
               </div>

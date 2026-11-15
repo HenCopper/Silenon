@@ -15,8 +15,16 @@ import {
   Loader2,
   AlertCircle,
 } from 'lucide-react';
-import { ThemeMode } from '../types/question';
+import { collection, addDoc } from 'firebase/firestore';
+import { ThemeMode, StudyMode } from '../types/question';
 import { MemorizLogo } from './MemorizLogo';
+import { db, handleFirestoreError, OperationType } from '../lib/firebase';
+import { fetchWithTimeout } from '../lib/aiOrchestrator';
+import {
+  LAST_ACTIVE_MODE_STORAGE_KEY,
+  parseSavedStudyMode,
+  saveLastActiveStudyMode,
+} from '../hooks/useStudyCarousel';
 
 export const OFFICIAL_INSTAGRAM_URL =
   (import.meta as any).env?.VITE_OFFICIAL_INSTAGRAM_URL || 'https://www.instagram.com/silenon.app/';
@@ -85,6 +93,36 @@ export const SupportPortalPage: React.FC = () => {
   const [theme, setTheme] = useState<ThemeMode>(() => readSavedTheme());
   const [isThemeMenuOpen, setIsThemeMenuOpen] = useState<boolean>(false);
   const [activeAction, setActiveAction] = useState<ReportActionType>(null);
+  const [returnMode] = useState<StudyMode>(() => {
+    if (typeof window === 'undefined') return 'practice';
+    const params = new URLSearchParams(window.location.search);
+    const fromQuery = parseSavedStudyMode(params.get('mode'));
+    if (fromQuery) {
+      saveLastActiveStudyMode(fromQuery);
+      return fromQuery;
+    }
+    try {
+      const fromSession = parseSavedStudyMode(sessionStorage.getItem(LAST_ACTIVE_MODE_STORAGE_KEY));
+      if (fromSession) return fromSession;
+    } catch {
+      // Ignore storage error
+    }
+    try {
+      const fromLocal = parseSavedStudyMode(localStorage.getItem(LAST_ACTIVE_MODE_STORAGE_KEY));
+      if (fromLocal) return fromLocal;
+    } catch {
+      // Ignore storage error
+    }
+    return 'practice';
+  });
+
+  const returnHref = `/?mode=${encodeURIComponent(returnMode)}`;
+
+  const handleBackToApp = (e?: React.MouseEvent) => {
+    if (e) e.preventDefault();
+    saveLastActiveStudyMode(returnMode);
+    window.location.href = returnHref;
+  };
 
   // Form states
   const [rating, setRating] = useState<number>(5);
@@ -136,25 +174,63 @@ export const SupportPortalPage: React.FC = () => {
     setIsSubmitting(true);
     setSubmitError(null);
 
+    const nowIso = new Date().toISOString();
+    const userAgentStr = (typeof navigator !== 'undefined' ? navigator.userAgent : '').slice(0, 600);
+    const cleanSubject = subject.trim().slice(0, 300);
+    const cleanMessage = (
+      message.trim() || (activeAction === 'rating' ? `Avaliação: ${rating}/5 estrelas` : '')
+    ).slice(0, 4000);
+    const cleanContact = contactInfo.trim().slice(0, 300);
+
+    const debugDumpStr = JSON.stringify({
+      rating: activeAction === 'rating' ? rating : null,
+      subject: cleanSubject,
+      contactInfo: cleanContact,
+      theme,
+      url: typeof window !== 'undefined' ? window.location.href : '',
+    }).slice(0, 10000);
+
+    const reportFirestoreDoc = {
+      kind: activeAction,
+      category: activeAction,
+      questionCode: cleanSubject,
+      message: cleanMessage,
+      debugDump: debugDumpStr,
+      createdAt: nowIso,
+      userAgent: userAgentStr,
+    };
+
     try {
-      const response = await fetch('/api/report', {
+      let savedToFirestore = false;
+      try {
+        await addDoc(collection(db, 'reports'), reportFirestoreDoc);
+        savedToFirestore = true;
+      } catch (fsErr: unknown) {
+        const fsMsg = fsErr instanceof Error ? fsErr.message : String(fsErr);
+        if (fsMsg.toLowerCase().includes('Missing or insufficient permissions'.toLowerCase())) {
+          handleFirestoreError(fsErr, OperationType.CREATE, 'reports');
+        }
+        console.warn('Firestore report write warning (falling back to /api/report):', fsErr);
+      }
+
+      const response = await fetchWithTimeout('/api/report', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          category: activeAction,
+          ...reportFirestoreDoc,
           rating: activeAction === 'rating' ? rating : undefined,
-          subject: subject.trim(),
-          message: message.trim(),
-          contactInfo: contactInfo.trim(),
+          subject: cleanSubject,
+          contactInfo: cleanContact,
           theme,
-          userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : '',
-          timestamp: new Date().toISOString(),
+          timestamp: nowIso,
         }),
-      });
+      }).catch(() => null);
 
-      if (!response.ok) {
-        const errData = await response.json().catch(() => null);
-        throw new Error(errData?.error || `Falha no envio (HTTP ${response.status}).`);
+      if (!savedToFirestore && (!response || !response.ok)) {
+        const errData = response ? await response.json().catch(() => null) : null;
+        throw new Error(
+          errData?.error || `Falha no envio${response ? ` (HTTP ${response.status})` : ''}.`
+        );
       }
 
       setSubmitSuccess(true);
@@ -168,9 +244,9 @@ export const SupportPortalPage: React.FC = () => {
   };
 
   return (
-    <div className="min-h-[100vh] min-h-[100dvh] w-full bg-canvas theme-bg-canvas text-primary theme-text-primary flex flex-col justify-between p-4 sm:p-6 relative select-none">
-      {/* Top Bar with Brand & Top-Right Gear Theme Switcher */}
-      <header className="w-full max-w-2xl mx-auto flex items-center justify-between">
+    <div className="min-h-[100vh] min-h-[100dvh] w-full bg-canvas theme-bg-canvas text-primary theme-text-primary flex flex-col p-4 sm:p-6 relative select-none">
+      {/* Top Bar with Brand, Voltar ao Silenon & Top-Right Gear Theme Switcher */}
+      <header className="w-full max-w-lg md:max-w-3xl lg:max-w-4xl mx-auto flex items-center justify-between gap-3 shrink-0">
         <div className="flex items-center gap-2.5">
           <MemorizLogo size={32} />
           <div>
@@ -181,56 +257,69 @@ export const SupportPortalPage: React.FC = () => {
           </div>
         </div>
 
-        {/* Gear Theme Switcher in Top-Right Corner */}
-        <div className="relative" ref={themeMenuRef}>
-          <button
-            type="button"
-            onClick={() => setIsThemeMenuOpen((prev) => !prev)}
-            className="p-2.5 rounded-xl bg-surface hover:bg-surface-hover border border-border text-secondary hover:text-primary transition-colors cursor-pointer shadow-2xs flex items-center gap-1.5 text-xs font-medium"
-            title="Alternar tema visual"
-            aria-label="Configurações de tema"
+        <div className="flex items-center gap-2">
+          <a
+            href={returnHref}
+            onClick={handleBackToApp}
+            className="px-3 py-2 rounded-xl bg-surface hover:bg-surface-hover border border-border text-secondary hover:text-primary transition-colors cursor-pointer shadow-2xs flex items-center gap-1.5 text-xs font-semibold"
+            title="Retornar exatamente para onde você estava no Silenon"
           >
-            <Settings className="w-4 h-4 text-accent" />
-            <span className="hidden sm:inline">Tema</span>
-          </button>
+            <ArrowLeft className="w-3.5 h-3.5 text-accent" />
+            <span>Voltar ao Silenon</span>
+          </a>
 
-          {isThemeMenuOpen && (
-            <div className="absolute right-0 mt-2 w-44 rounded-xl bg-surface border border-border shadow-xl p-1.5 z-50 space-y-1">
-              {THEME_OPTIONS.map((opt) => {
-                const isActive = theme === opt.id;
-                return (
-                  <button
-                    key={opt.id}
-                    type="button"
-                    onClick={() => {
-                      setTheme(opt.id);
-                      setIsThemeMenuOpen(false);
-                    }}
-                    className={`w-full px-3 py-2 rounded-lg text-xs font-medium flex items-center justify-between transition-colors cursor-pointer ${
-                      isActive
-                        ? 'bg-accent text-accent-contrast font-semibold'
-                        : 'text-secondary hover:text-primary hover:bg-surface-hover'
-                    }`}
-                  >
-                    <span className="flex items-center gap-2">
-                      {opt.icon}
-                      <span>{opt.label}</span>
-                    </span>
-                    {isActive && <span className="text-[10px]">●</span>}
-                  </button>
-                );
-              })}
-            </div>
-          )}
+          {/* Gear Theme Switcher in Top-Right Corner */}
+          <div className="relative" ref={themeMenuRef}>
+            <button
+              type="button"
+              onClick={() => setIsThemeMenuOpen((prev) => !prev)}
+              className="p-2.5 rounded-xl bg-surface hover:bg-surface-hover border border-border text-secondary hover:text-primary transition-colors cursor-pointer shadow-2xs flex items-center gap-1.5 text-xs font-medium"
+              title="Alternar tema visual"
+              aria-label="Configurações de tema"
+            >
+              <Settings className="w-4 h-4 text-accent" />
+              <span className="hidden sm:inline">Tema</span>
+            </button>
+
+            {isThemeMenuOpen && (
+              <div className="absolute right-0 mt-2 w-44 rounded-xl bg-surface border border-border shadow-xl p-1.5 z-50 space-y-1">
+                {THEME_OPTIONS.map((opt) => {
+                  const isActive = theme === opt.id;
+                  return (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => {
+                        setTheme(opt.id);
+                        setIsThemeMenuOpen(false);
+                      }}
+                      className={`w-full px-3 py-2 rounded-lg text-xs font-medium flex items-center justify-between transition-colors cursor-pointer ${
+                        isActive
+                          ? 'bg-accent text-accent-contrast font-semibold'
+                          : 'text-secondary hover:text-primary hover:bg-surface-hover'
+                      }`}
+                    >
+                      <span className="flex items-center gap-2">
+                        {opt.icon}
+                        <span>{opt.label}</span>
+                      </span>
+                      {isActive && <span className="text-[10px]">●</span>}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
       </header>
 
       {/* Central Content Area */}
-      <main className="w-full max-w-lg mx-auto my-auto py-8">
-        <div className="theme-card rounded-2xl border border-border bg-surface p-6 sm:p-8 shadow-lg space-y-6">
+      <div className="flex-1 flex items-center justify-center py-6 px-4">
+        <main className="w-full max-w-lg md:max-w-3xl lg:max-w-4xl mx-auto">
+          <div className="theme-card rounded-2xl border border-border bg-surface p-6 sm:p-8 shadow-lg space-y-6">
           {!activeAction ? (
             <>
-              <div className="text-center space-y-1.5">
+              <div className="text-center space-y-1.5 max-w-xl mx-auto">
                 <h2 className="text-lg sm:text-xl font-bold text-primary">
                   Central de Feedback &amp; Contato
                 </h2>
@@ -239,21 +328,21 @@ export const SupportPortalPage: React.FC = () => {
                 </p>
               </div>
 
-              {/* 3 Main Action Buttons */}
-              <div className="space-y-3">
+              {/* 3 Main Action Buttons (1 column on mobile, 3 balanced square cards side-by-side on desktop) */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5">
                 <button
                   type="button"
                   onClick={() => handleSelectAction('rating')}
-                  className="w-full p-4 rounded-xl border border-border bg-surface-subtle hover:bg-surface-hover hover:border-accent transition-all flex items-center gap-3.5 text-left cursor-pointer group"
+                  className="w-full p-4 md:p-5 rounded-xl border border-border bg-surface-subtle hover:bg-surface-hover hover:border-accent transition-all flex flex-row md:flex-col items-center md:items-start justify-start md:justify-between gap-3.5 md:min-h-[172px] text-left cursor-pointer group"
                 >
-                  <div className="w-10 h-10 rounded-xl bg-accent-subtle border border-accent-subtle-border text-accent flex items-center justify-center shrink-0">
+                  <div className="w-10 h-10 md:w-11 md:h-11 rounded-xl bg-accent-subtle border border-accent-subtle-border text-accent flex items-center justify-center shrink-0">
                     <Star className="w-5 h-5" />
                   </div>
-                  <div className="flex-1 min-w-0">
+                  <div className="flex-1 md:flex-initial min-w-0 space-y-1">
                     <div className="text-sm font-bold text-primary group-hover:text-accent transition-colors">
                       Avaliar
                     </div>
-                    <div className="text-xs text-muted">
+                    <div className="text-xs text-muted leading-relaxed">
                       Deixe sua nota e conte como o Silenon está ajudando nos estudos
                     </div>
                   </div>
@@ -262,16 +351,16 @@ export const SupportPortalPage: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => handleSelectAction('bug')}
-                  className="w-full p-4 rounded-xl border border-border bg-surface-subtle hover:bg-surface-hover hover:border-accent transition-all flex items-center gap-3.5 text-left cursor-pointer group"
+                  className="w-full p-4 md:p-5 rounded-xl border border-border bg-surface-subtle hover:bg-surface-hover hover:border-accent transition-all flex flex-row md:flex-col items-center md:items-start justify-start md:justify-between gap-3.5 md:min-h-[172px] text-left cursor-pointer group"
                 >
-                  <div className="w-10 h-10 rounded-xl bg-accent-subtle border border-accent-subtle-border text-accent flex items-center justify-center shrink-0">
+                  <div className="w-10 h-10 md:w-11 md:h-11 rounded-xl bg-accent-subtle border border-accent-subtle-border text-accent flex items-center justify-center shrink-0">
                     <Bug className="w-5 h-5" />
                   </div>
-                  <div className="flex-1 min-w-0">
+                  <div className="flex-1 md:flex-initial min-w-0 space-y-1">
                     <div className="text-sm font-bold text-primary group-hover:text-accent transition-colors">
                       Reportar erro
                     </div>
-                    <div className="text-xs text-muted">
+                    <div className="text-xs text-muted leading-relaxed">
                       Relate falhas visuais, questões com problema ou comportamento inesperado
                     </div>
                   </div>
@@ -280,29 +369,29 @@ export const SupportPortalPage: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => handleSelectAction('contact')}
-                  className="w-full p-4 rounded-xl border border-border bg-surface-subtle hover:bg-surface-hover hover:border-accent transition-all flex items-center gap-3.5 text-left cursor-pointer group"
+                  className="w-full p-4 md:p-5 rounded-xl border border-border bg-surface-subtle hover:bg-surface-hover hover:border-accent transition-all flex flex-row md:flex-col items-center md:items-start justify-start md:justify-between gap-3.5 md:min-h-[172px] text-left cursor-pointer group"
                 >
-                  <div className="w-10 h-10 rounded-xl bg-accent-subtle border border-accent-subtle-border text-accent flex items-center justify-center shrink-0">
+                  <div className="w-10 h-10 md:w-11 md:h-11 rounded-xl bg-accent-subtle border border-accent-subtle-border text-accent flex items-center justify-center shrink-0">
                     <MessageSquare className="w-5 h-5" />
                   </div>
-                  <div className="flex-1 min-w-0">
+                  <div className="flex-1 md:flex-initial min-w-0 space-y-1">
                     <div className="text-sm font-bold text-primary group-hover:text-accent transition-colors">
                       Contatar o desenvolvedor
                     </div>
-                    <div className="text-xs text-muted">
+                    <div className="text-xs text-muted leading-relaxed">
                       Envie sugestões, parcerias ou dúvidas diretamente ao criador
                     </div>
                   </div>
                 </button>
               </div>
 
-              {/* Official Social Network Button */}
-              <div className="pt-3 border-t border-border">
+              {/* Official Social Network Centered in Card Footer */}
+              <div className="flex justify-center pt-4 border-t border-border">
                 <a
                   href={OFFICIAL_INSTAGRAM_URL}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="w-full py-2.5 px-4 rounded-xl border border-border bg-surface hover:bg-surface-hover text-secondary hover:text-primary text-xs font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                  className="py-2.5 px-5 rounded-xl border border-border bg-surface hover:bg-surface-hover text-secondary hover:text-primary text-xs font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer"
                 >
                   <span>Rede Social Oficial (@silenon.app)</span>
                   <ExternalLink className="w-3.5 h-3.5 text-accent" />
@@ -458,11 +547,12 @@ export const SupportPortalPage: React.FC = () => {
               )}
             </form>
           )}
-        </div>
-      </main>
+          </div>
+        </main>
+      </div>
 
       {/* Footer */}
-      <footer className="w-full max-w-2xl mx-auto text-center text-[11px] text-muted py-2">
+      <footer className="w-full max-w-lg md:max-w-3xl lg:max-w-4xl mx-auto text-center text-[11px] text-muted py-2 shrink-0">
         Silenon — Simples no silício
       </footer>
     </div>

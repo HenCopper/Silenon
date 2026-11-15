@@ -986,7 +986,10 @@ export const SimuladoView: React.FC<SimuladoViewProps> = ({
           </div>
 
           {currentQ.associated_context?.has_associated_context && (
-            <div className="p-3.5 bg-surface-subtle border border-border rounded-lg text-xs text-secondary max-h-36 overflow-y-auto leading-relaxed">
+            <div
+              data-question-selectable="true"
+              className="p-3.5 bg-surface-subtle border border-border rounded-lg text-xs text-secondary max-h-36 overflow-y-auto leading-relaxed"
+            >
               <span className="font-semibold text-primary block mb-1">
                 {currentQ.associated_context.title || 'Texto de Apoio'}
               </span>
@@ -994,7 +997,10 @@ export const SimuladoView: React.FC<SimuladoViewProps> = ({
             </div>
           )}
 
-          <div className="text-primary font-medium text-base leading-relaxed whitespace-pre-line">
+          <div
+            data-question-selectable="true"
+            className="text-primary font-medium text-base leading-relaxed whitespace-pre-line"
+          >
             {currentQ.stem.full_text}
           </div>
 
@@ -1024,7 +1030,7 @@ export const SimuladoView: React.FC<SimuladoViewProps> = ({
             </div>
           )}
 
-          <div className="space-y-2.5">
+          <div className="space-y-2.5" data-question-selectable="true">
             {currentQ.options.map((opt) => {
               const isSelected = userAnswers[currentQ.sequence_id] === opt.letter;
               return (
@@ -1222,7 +1228,10 @@ export const SimuladoView: React.FC<SimuladoViewProps> = ({
                   </div>
                 </div>
 
-                <p className="text-xs sm:text-sm text-primary leading-relaxed">
+                <p
+                  data-question-selectable="true"
+                  className="text-xs sm:text-sm text-primary leading-relaxed"
+                >
                   {stemText}
                 </p>
 
@@ -1234,7 +1243,10 @@ export const SimuladoView: React.FC<SimuladoViewProps> = ({
                         Gabarito Oficial: Alternativa {deducedAnswer}
                       </div>
                     )}
-                    <div className="p-3 bg-surface-subtle border border-border rounded-lg text-xs text-secondary leading-relaxed">
+                    <div
+                      data-question-selectable="true"
+                      className="p-3 bg-surface-subtle border border-border rounded-lg text-xs text-secondary leading-relaxed"
+                    >
                       <strong className="font-semibold text-primary">Comentário pedagógico:</strong>{' '}
                       {pedagogicalExplanation}
                     </div>

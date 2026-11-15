@@ -981,9 +981,7 @@ html[data-theme="amber"] .verified-badge-watermark,
 }
 
 /* =========================================================================
-   SILENON LOGO ("Si") RAZOR-SLIT + ORGANIC FAN EMERGENCE ANIMATION
-   Recorte horizontal na base (y = 376) + topo livre com pico aleatório
-   entre -100px e -135px (--si-peak-y)
+   SILENON LOGO ("Si") STATIC BRAND MARK STROKE
    ========================================================================= */
 .silenon-mark-rect {
   stroke: transparent;
@@ -998,76 +996,36 @@ html[data-theme="amber"] .silenon-mark-rect,
   stroke-width: 14px;
 }
 
-.si-slit-piece {
-  transform-box: view-box;
-  will-change: transform;
-}
-
-.si-slit-s-bottom {
-  transform-origin: 226px 376px;
-  animation: si-emerge-s-bottom 0.68s cubic-bezier(0.22, 1, 0.36, 1) 0ms both;
-}
-
-.si-slit-i-stem {
-  transform-origin: 394px 376px;
-  animation: si-emerge-i-stem 0.68s cubic-bezier(0.22, 1, 0.36, 1) 70ms both;
-}
-
-.si-slit-s-top {
-  transform-origin: 226px 376px;
-  animation: si-emerge-s-top 0.72s cubic-bezier(0.22, 1, 0.36, 1) 140ms both;
-}
-
-.si-slit-i-dot {
-  transform-origin: 401px 376px;
-  animation: si-emerge-i-dot 0.74s cubic-bezier(0.22, 1, 0.36, 1) 210ms both;
-}
-
-@keyframes si-emerge-s-bottom {
+/* =========================================================================
+   QUESTION SVG TRACE-BY-TRACE ANIMATION (< 500ms total)
+   ========================================================================= */
+@keyframes svg-stroke-draw {
   0% {
-    transform: translateY(150px) rotate(-9deg);
-  }
-  62% {
-    transform: translateY(var(--si-peak-y, -118px)) rotate(3.5deg);
+    stroke-dashoffset: var(--svg-stroke-len, 0);
+    opacity: 0;
   }
   100% {
-    transform: translateY(0px) rotate(0deg);
+    stroke-dashoffset: 0;
+    opacity: 1;
   }
 }
 
-@keyframes si-emerge-i-stem {
+@keyframes svg-element-fade-up {
   0% {
-    transform: translateY(170px) rotate(-7deg);
-  }
-  62% {
-    transform: translateY(var(--si-peak-y, -118px)) rotate(2.8deg);
+    opacity: 0;
+    transform: translateY(2px);
   }
   100% {
-    transform: translateY(0px) rotate(0deg);
+    opacity: 1;
+    transform: translateY(0);
   }
 }
 
-@keyframes si-emerge-s-top {
+@keyframes svg-element-fade {
   0% {
-    transform: translateY(255px) rotate(-10deg);
-  }
-  62% {
-    transform: translateY(var(--si-peak-y, -118px)) rotate(4deg);
+    opacity: 0;
   }
   100% {
-    transform: translateY(0px) rotate(0deg);
+    opacity: 1;
   }
 }
-
-@keyframes si-emerge-i-dot {
-  0% {
-    transform: translateY(255px) rotate(-8deg);
-  }
-  62% {
-    transform: translateY(var(--si-peak-y, -118px)) rotate(3.5deg);
-  }
-  100% {
-    transform: translateY(0px) rotate(0deg);
-  }
-}
-

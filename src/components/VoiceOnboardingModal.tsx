@@ -38,19 +38,7 @@ export const VoiceOnboardingModal: React.FC<VoiceOnboardingModalProps> = ({
     setErrorMessage(null);
 
     try {
-      // 1. Unlock speechSynthesis on user gesture
-      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-        try {
-          window.speechSynthesis.cancel();
-          const unlockUtterance = new SpeechSynthesisUtterance('');
-          unlockUtterance.volume = 0;
-          window.speechSynthesis.speak(unlockUtterance);
-        } catch {
-          // Ignore speechSynthesis unlock errors on unsupported browsers
-        }
-      }
-
-      // 2. Request real microphone permission via getUserMedia
+      // Request real microphone permission via getUserMedia
       if (
         typeof navigator !== 'undefined' &&
         navigator.mediaDevices &&

@@ -11,12 +11,15 @@ import {
   SimuladoResult, 
   UserStatistics 
 } from '../types/question';
-import { initialQuestionBank } from '../data/question_bank';
+import { initialQuestionBank, loadDefaultZipQuestionBanks } from '../data/question_bank';
 import { LocalStorageManager, defaultStatistics } from '../lib/storage';
 import { FastSearchEngine } from '../lib/searchEngine';
 import { calculateNextSRS, isItemDueForReview } from '../lib/srsEngine';
 import { buildTwinMap, getQuestionContentHash, countUniqueQuestions } from '../lib/duplicateEngine';
 import { deleteDatabaseMedia } from '../lib/mediaBlobStorage';
+import { acquireMediaUrl, getCachedMediaUrlSync } from '../lib/mediaWindowCache';
+import { preloadAndAnalyzeImage } from '../components/SmartQuestionImage';
+import { detectMediaRenderKind, preloadSvgMarkup } from '../components/QuestionMediaRenderer';
 
 interface UseStudyDataOptions {
   currentMode: StudyMode;
@@ -27,6 +30,10 @@ export function useStudyData({ currentMode }: UseStudyDataOptions) {
   const [databases, setDatabases] = useState<QuestionDatabase[]>(() => {
     return LocalStorageManager.getDatabases(initialQuestionBank.question_bank);
   });
+  const [isLoadingDefaultBanks, setIsLoadingDefaultBanks] = useState<boolean>(
+    () => databases.length === 0
+  );
+  const [defaultBanksError, setDefaultBanksError] = useState<string | null>(null);
 
   const questions = useMemo(() => {
     return LocalStorageManager.getAllQuestions(databases);
@@ -42,19 +49,100 @@ export function useStudyData({ currentMode }: UseStudyDataOptions) {
   });
 
   // 2. Filters State
-  const [filters, setFilters] = useState<FilterState>({
-    database_id: 'all',
-    subject: 'all',
-    exam_board: 'all',
-    year: 'all',
-    topic: 'all',
-    status: 'all',
-    searchQuery: '',
+  const [filters, setFilters] = useState<FilterState>(() => {
+    const savedDbId = LocalStorageManager.getActiveDatabaseId();
+    const isValidSaved =
+      savedDbId === 'all' || databases.some((db) => db.id === savedDbId);
+    const initialDbId = isValidSaved ? savedDbId : 'all';
+    return {
+      database_id: initialDbId,
+      subject: 'all',
+      exam_board: 'all',
+      year: 'all',
+      topic: 'all',
+      status: 'all',
+      searchQuery: '',
+    };
   });
 
   const [currentIndex, setCurrentIndex] = useState<number>(() => {
-    return LocalStorageManager.getLastQuestionIndex('all');
+    return LocalStorageManager.getLastQuestionIndex(filters.database_id);
   });
+
+  useEffect(() => {
+    if (databases.length > 0) {
+      LocalStorageManager.saveActiveDatabaseId(filters.database_id);
+    }
+  }, [filters.database_id, databases.length]);
+
+  const bootstrapDefaultBanks = useCallback(async () => {
+    const existing = LocalStorageManager.getDatabases(initialQuestionBank.question_bank);
+    if (existing.length > 0) {
+      setDatabases(existing);
+      setIsLoadingDefaultBanks(false);
+      setDefaultBanksError(null);
+      return;
+    }
+
+    setIsLoadingDefaultBanks(true);
+    setDefaultBanksError(null);
+
+    try {
+      const importedBanks = await loadDefaultZipQuestionBanks();
+
+      // Re-check after async work to stay idempotent under StrictMode/concurrent mounts
+      const currentSaved = LocalStorageManager.getDatabases(initialQuestionBank.question_bank);
+      if (currentSaved.length > 0) {
+        setDatabases(currentSaved);
+        return;
+      }
+
+      let nextDatabases: QuestionDatabase[] = [];
+      let initialActiveDatabaseId: string | 'all' = 'all';
+
+      for (const bank of importedBanks) {
+        const { updatedDatabases, newDatabaseId } = LocalStorageManager.addDatabase(
+          {
+            name: bank.name,
+            filename: bank.filename,
+            databaseId: bank.databaseId,
+            questions: bank.questions,
+            isDefault: true,
+          },
+          nextDatabases
+        );
+        nextDatabases = updatedDatabases;
+        if (bank.isInitialActive) {
+          initialActiveDatabaseId = newDatabaseId;
+        }
+      }
+
+      if (initialActiveDatabaseId === 'all' && nextDatabases.length > 0) {
+        initialActiveDatabaseId = nextDatabases[nextDatabases.length - 1].id;
+      }
+
+      LocalStorageManager.saveActiveDatabaseId(initialActiveDatabaseId);
+      setDatabases(nextDatabases);
+      setFilters((prev) => ({ ...prev, database_id: initialActiveDatabaseId }));
+      setCurrentIndex(LocalStorageManager.getLastQuestionIndex(initialActiveDatabaseId));
+    } catch (err) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : 'Não foi possível carregar os bancos de questões iniciais.';
+      setDefaultBanksError(message);
+    } finally {
+      setIsLoadingDefaultBanks(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (LocalStorageManager.getDatabases(initialQuestionBank.question_bank).length === 0) {
+      void bootstrapDefaultBanks();
+    } else {
+      setIsLoadingDefaultBanks(false);
+    }
+  }, [bootstrapDefaultBanks]);
 
   // 3. High-performance Search Engine Instance
   const searchEngine = useMemo(() => {
@@ -114,7 +202,9 @@ export function useStudyData({ currentMode }: UseStudyDataOptions) {
 
   // 7. Filtered Questions Array
   const filteredQuestions = useMemo(() => {
-    return matchedIndices.map(idx => questions[idx]);
+    return matchedIndices
+      .map(idx => questions[idx])
+      .filter((q): q is Question => Boolean(q));
   }, [matchedIndices, questions]);
 
   // 8. Compute Facet Counts for Filter Sidebar
@@ -137,6 +227,83 @@ export function useStudyData({ currentMode }: UseStudyDataOptions) {
   }, [currentIndex, filters.database_id, filteredQuestions.length]);
 
   const currentQuestion: Question | undefined = filteredQuestions[currentIndex];
+
+  // Silent RAM preload (Image decode + monochrome canvas inspection + SVG cache) for adjacent questions
+  useEffect(() => {
+    if (currentMode !== 'practice' || filteredQuestions.length === 0) return;
+
+    const adjacentQuestions: Question[] = [];
+    const nextQ =
+      currentIndex + 1 >= 0 && currentIndex + 1 < filteredQuestions.length
+        ? filteredQuestions[currentIndex + 1]
+        : undefined;
+    const prevQ =
+      currentIndex - 1 >= 0 && currentIndex - 1 < filteredQuestions.length
+        ? filteredQuestions[currentIndex - 1]
+        : undefined;
+    if (nextQ) adjacentQuestions.push(nextQ);
+    if (prevQ) adjacentQuestions.push(prevQ);
+    if (adjacentQuestions.length === 0) return;
+
+    let cancelled = false;
+    const mediaItems: Array<{ url: string; type?: string }> = [];
+    const seenUrls = new Set<string>();
+
+    const pushMedia = (url?: string | null, type?: string) => {
+      const trimmed = url?.trim();
+      if (!trimmed || seenUrls.has(trimmed)) return;
+      seenUrls.add(trimmed);
+      mediaItems.push({ url: trimmed, type });
+    };
+
+    for (const q of adjacentQuestions) {
+      if (!q) continue;
+      if (Array.isArray(q?.media)) {
+        for (const m of q.media) pushMedia(m?.url, m?.type);
+      }
+      if (Array.isArray(q?.options)) {
+        for (const opt of q.options) {
+          pushMedia(opt?.media_url);
+          if (Array.isArray(opt?.media)) {
+            for (const m of opt.media) pushMedia(m?.url, m?.type);
+          }
+        }
+      }
+      if (Array.isArray(q?.resolution?.media)) {
+        for (const m of q.resolution.media) pushMedia(m?.url, m?.type);
+      }
+    }
+
+    if (mediaItems.length === 0) return;
+
+    const runPreload = () => {
+      if (cancelled) return;
+      for (const item of mediaItems) {
+        const kind = detectMediaRenderKind(item.url, item.type);
+        if (kind === 'audio' || kind === 'video') continue;
+
+        const syncResolved = getCachedMediaUrlSync(item.url);
+        const resolvePromise = syncResolved
+          ? Promise.resolve(syncResolved)
+          : acquireMediaUrl(item.url);
+
+        void resolvePromise.then((resolved) => {
+          if (cancelled || !resolved) return;
+          if (kind === 'svg') {
+            void preloadSvgMarkup(resolved, item.url);
+          } else {
+            void preloadAndAnalyzeImage(resolved);
+          }
+        });
+      }
+    };
+
+    const timerId = window.setTimeout(runPreload, 60);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timerId);
+    };
+  }, [currentMode, filteredQuestions, currentIndex]);
 
   // 10. Handler: Answer Submission
   const handleAnswer = useCallback((
@@ -282,6 +449,7 @@ export function useStudyData({ currentMode }: UseStudyDataOptions) {
 
   // 17. Database actions
   const handleSelectDatabase = useCallback((dbId: string | 'all') => {
+    LocalStorageManager.saveActiveDatabaseId(dbId);
     setFilters(prev => ({ ...prev, database_id: dbId }));
     const savedIndex = LocalStorageManager.getLastQuestionIndex(dbId);
     setCurrentIndex(savedIndex);
@@ -294,6 +462,7 @@ export function useStudyData({ currentMode }: UseStudyDataOptions) {
     const { updatedDatabases, newDatabaseId } = LocalStorageManager.addDatabase(newDb, databases);
     setDatabases(updatedDatabases);
     if (activateImmediately) {
+      LocalStorageManager.saveActiveDatabaseId(newDatabaseId);
       setFilters(prev => ({ ...prev, database_id: newDatabaseId }));
     }
     setCurrentIndex(0);
@@ -309,28 +478,60 @@ export function useStudyData({ currentMode }: UseStudyDataOptions) {
     const updated = LocalStorageManager.deleteDatabase(id, databases);
     setDatabases(updated);
     if (filters.database_id === id) {
+      LocalStorageManager.saveActiveDatabaseId('all');
       setFilters(prev => ({ ...prev, database_id: 'all' }));
     }
     setCurrentIndex(0);
   }, [databases, filters.database_id]);
 
-  const handleRestoreDefaultDatabases = useCallback(() => {
-    const defaultDb: QuestionDatabase = {
-      id: 'default_main',
-      name: 'Principal',
-      questions: initialQuestionBank.question_bank.map(q => ({
-        ...q,
-        database_id: 'default_main',
-        database_name: 'Principal',
-      })),
-      created_at: Date.now(),
-      is_default: true,
-    };
-    LocalStorageManager.saveDatabases([defaultDb]);
-    setDatabases([defaultDb]);
-    setFilters(prev => ({ ...prev, database_id: 'all' }));
-    setCurrentIndex(0);
-  }, []);
+  const handleRestoreDefaultDatabases = useCallback(async () => {
+    setIsLoadingDefaultBanks(true);
+    setDefaultBanksError(null);
+    try {
+      await Promise.all(
+        databases.map((db) => deleteDatabaseMedia(db.id).catch(() => {}))
+      );
+
+      const importedBanks = await loadDefaultZipQuestionBanks();
+      let nextDatabases: QuestionDatabase[] = [];
+      let initialActiveDatabaseId: string | 'all' = 'all';
+
+      for (const bank of importedBanks) {
+        const { updatedDatabases, newDatabaseId } = LocalStorageManager.addDatabase(
+          {
+            name: bank.name,
+            filename: bank.filename,
+            databaseId: bank.databaseId,
+            questions: bank.questions,
+            isDefault: true,
+          },
+          nextDatabases
+        );
+        nextDatabases = updatedDatabases;
+        if (bank.isInitialActive) {
+          initialActiveDatabaseId = newDatabaseId;
+        }
+      }
+
+      if (initialActiveDatabaseId === 'all' && nextDatabases.length > 0) {
+        initialActiveDatabaseId = nextDatabases[nextDatabases.length - 1].id;
+      }
+
+      LocalStorageManager.saveActiveDatabaseId(initialActiveDatabaseId);
+      setDatabases(nextDatabases);
+      setFilters(prev => ({ ...prev, database_id: initialActiveDatabaseId }));
+      setCurrentIndex(0);
+    } catch (err) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : 'Não foi possível restaurar os bancos padrão.';
+      setDefaultBanksError(message);
+      throw err;
+    } finally {
+      setIsLoadingDefaultBanks(false);
+    }
+  }, [databases]);
 
   // 18. Simulado and SRS view helpers
   const handleRecordSimuladoResult = useCallback((result: SimuladoResult) => {
@@ -376,13 +577,23 @@ export function useStudyData({ currentMode }: UseStudyDataOptions) {
     }
   }, [twinMap, questions]);
 
+  const reloadStudyProgress = useCallback(() => {
+    setAnswers(LocalStorageManager.getAnswers());
+    setSRSItems(LocalStorageManager.getSRSItems());
+    setBookmarks(LocalStorageManager.getBookmarks());
+    setStrikes(LocalStorageManager.getOptionStrikes());
+    setStats(LocalStorageManager.getStatistics());
+    setUnansweredTimes(LocalStorageManager.getUnansweredTimes());
+    setCurrentIndex(LocalStorageManager.getLastQuestionIndex(filters.database_id));
+  }, [filters.database_id]);
+
   const handleResetAllProgress = useCallback(() => {
     LocalStorageManager.resetAllProgress();
     setAnswers({});
     setSRSItems({});
     setBookmarks({});
     setStrikes({});
-    setStats(defaultStatistics);
+    setStats({ ...defaultStatistics, subject_stats: {} });
     setUnansweredTimes({});
   }, []);
 
@@ -402,6 +613,9 @@ export function useStudyData({ currentMode }: UseStudyDataOptions) {
   return {
     databases,
     setDatabases,
+    isLoadingDefaultBanks,
+    defaultBanksError,
+    handleRetryDefaultBanks: bootstrapDefaultBanks,
     questions,
     answers,
     srsItems,
@@ -441,6 +655,7 @@ export function useStudyData({ currentMode }: UseStudyDataOptions) {
     handleSaveSRSFromView,
     handleRecordSRSAnswer,
     handleResetAllProgress,
+    reloadStudyProgress,
     handleUpdateElapsedSeconds,
     handleUpdateDailyGoalXP,
   };

@@ -12,6 +12,8 @@ import {
   Brain,
   MessageSquare,
   Volume2,
+  VolumeX,
+  RotateCcw,
   X,
   Loader2,
   AlertCircle,
@@ -23,6 +25,9 @@ import {
   hasAnyAIKey,
   isVoiceOnboardingDone,
   runSocraticQuestionAnalysis,
+  notifyQuatNativeAudioDialog,
+  sanitizeTextForSpeech,
+  mapToStudentFriendlyError,
   formatRelativeTime,
 } from '../lib/aiOrchestrator';
 import {
@@ -32,6 +37,18 @@ import {
   QuestionChatInteraction,
 } from '../lib/questionChatStorage';
 import { VoiceOnboardingModal } from './VoiceOnboardingModal';
+
+function base64AudioToBlobUrl(base64: string, mimeType: string): string {
+  const clean = base64.replace(/^data:[^;]+;base64,/i, '').trim();
+  const binaryStr = window.atob(clean);
+  const len = binaryStr.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryStr.charCodeAt(i);
+  }
+  const blob = new Blob([bytes], { type: mimeType || 'audio/wav' });
+  return URL.createObjectURL(blob);
+}
 
 interface QuestionVoiceBarProps {
   question: Question;
@@ -47,17 +64,20 @@ export const QuestionVoiceBar: React.FC<QuestionVoiceBarProps> = ({
   const [expandedReasoningIds, setExpandedReasoningIds] = useState<Record<string, boolean>>({});
   const [expandedContextIds, setExpandedContextIds] = useState<Record<string, boolean>>({});
 
-  // Recording states
+  // Recording & input states
   const [isRecording, setIsRecording] = useState<boolean>(false);
   const [draftTranscript, setDraftTranscript] = useState<string>('');
   const [interimTranscript, setInterimTranscript] = useState<string>('');
+  const [pendingStudentText, setPendingStudentText] = useState<string | null>(null);
   const [isLoadingAI, setIsLoadingAI] = useState<boolean>(false);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
 
-  // SpeechSynthesis playback states
+  // Gemini Neural Audio playback states (strictly no window.speechSynthesis fallback)
   const [isSpeaking, setIsSpeaking] = useState<boolean>(false);
   const [isSpeechPaused, setIsSpeechPaused] = useState<boolean>(false);
   const [activeSpeakingInteractionId, setActiveSpeakingInteractionId] = useState<string | null>(null);
+  const [synthesizingInteractionId, setSynthesizingInteractionId] = useState<string | null>(null);
+  const [unavailableAudioIds, setUnavailableAudioIds] = useState<Record<string, boolean>>({});
 
   // Onboarding modal state
   const [isOnboardingOpen, setIsOnboardingOpen] = useState<boolean>(false);
@@ -78,7 +98,7 @@ export const QuestionVoiceBar: React.FC<QuestionVoiceBarProps> = ({
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
-  // Refs for continuous SpeechRecognition & Barge-in speech tracking
+  // Refs for continuous SpeechRecognition & Barge-in neural audio tracking
   const isRecordingRef = useRef<boolean>(false);
   const shouldRestartSpeechRef = useRef<boolean>(false);
   const recognitionRef = useRef<any>(null);
@@ -86,34 +106,48 @@ export const QuestionVoiceBar: React.FC<QuestionVoiceBarProps> = ({
 
   const fullSpokenTextRef = useRef<string>('');
   const spokenCharIndexRef = useRef<number>(0);
-  const boundaryFiredRef = useRef<boolean>(false);
-  const speechStartTimeRef = useRef<number>(0);
-  const speechAccumulatedMsRef = useRef<number>(0);
-  const fallbackTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const activeAudioElementRef = useRef<HTMLAudioElement | null>(null);
+  const activeAudioUrlRef = useRef<string | null>(null);
+  const speakingSessionIdRef = useRef<number>(0);
+  const spokenAudioCacheRef = useRef<Map<string, { audioBase64: string; mimeType: string }>>(
+    new Map()
+  );
   const activeInteractionIdRef = useRef<string | null>(null);
   const currentQuestionIdRef = useRef<number>(question.sequence_id);
+  const historyEndRef = useRef<HTMLDivElement | null>(null);
 
-  const clearFallbackTimer = () => {
-    if (fallbackTimerRef.current) {
-      clearInterval(fallbackTimerRef.current);
-      fallbackTimerRef.current = null;
-    }
-  };
-
-  const stopSpeechCleanup = useCallback(() => {
-    clearFallbackTimer();
-    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+  const revokeActiveAudioUrl = useCallback(() => {
+    if (activeAudioUrlRef.current) {
       try {
-        window.speechSynthesis.cancel();
+        URL.revokeObjectURL(activeAudioUrlRef.current);
       } catch {
         // Ignore
       }
+      activeAudioUrlRef.current = null;
     }
+  }, []);
+
+  const stopSpeechCleanup = useCallback(() => {
+    speakingSessionIdRef.current += 1;
+    if (activeAudioElementRef.current) {
+      try {
+        activeAudioElementRef.current.onended = null;
+        activeAudioElementRef.current.onerror = null;
+        activeAudioElementRef.current.ontimeupdate = null;
+        activeAudioElementRef.current.pause();
+        activeAudioElementRef.current.src = '';
+      } catch {
+        // Ignore
+      }
+      activeAudioElementRef.current = null;
+    }
+    revokeActiveAudioUrl();
     setIsSpeaking(false);
     setIsSpeechPaused(false);
     setActiveSpeakingInteractionId(null);
+    setSynthesizingInteractionId(null);
     activeInteractionIdRef.current = null;
-  }, []);
+  }, [revokeActiveAudioUrl]);
 
   const stopRecordingInternal = useCallback(() => {
     isRecordingRef.current = false;
@@ -148,9 +182,12 @@ export const QuestionVoiceBar: React.FC<QuestionVoiceBarProps> = ({
     stopSpeechCleanup();
     setDraftTranscript('');
     setInterimTranscript('');
+    setPendingStudentText(null);
     finalizedTranscriptRef.current = '';
     setErrorBanner(null);
     setIsHistoryExpanded(false);
+    setUnavailableAudioIds({});
+    setSynthesizingInteractionId(null);
 
     let cancelled = false;
     getQuestionThread(question.sequence_id).then((thread) => {
@@ -175,92 +212,151 @@ export const QuestionVoiceBar: React.FC<QuestionVoiceBarProps> = ({
     };
   }, [stopRecordingInternal, stopSpeechCleanup]);
 
-  // Start SpeechSynthesis playback with real-time onboundary + proportional timer tracking
+  // Play Gemini neural audio (zero fallback to robotic browser speechSynthesis)
   const speakResponseAloud = useCallback(
-    (fullText: string, interactionId: string) => {
-      if (typeof window === 'undefined' || !('speechSynthesis' in window) || !fullText) {
+    async (
+      fullText: string,
+      interactionId: string,
+      options?: {
+        preloadedAudio?: { audioBase64: string; mimeType: string };
+        forceRefresh?: boolean;
+      }
+    ) => {
+      if (typeof window === 'undefined' || !fullText) return;
+
+      stopSpeechCleanup();
+      const sessionToken = speakingSessionIdRef.current;
+      const questionIdAtStart = currentQuestionIdRef.current;
+
+      setUnavailableAudioIds(prev => {
+        if (!prev[interactionId]) return prev;
+        const next = { ...prev };
+        delete next[interactionId];
+        return next;
+      });
+
+      const markAudioUnavailable = () => {
+        if (currentQuestionIdRef.current !== questionIdAtStart) return;
+        setIsSpeaking(false);
+        setIsSpeechPaused(false);
+        setActiveSpeakingInteractionId(null);
+        setSynthesizingInteractionId(null);
+        activeInteractionIdRef.current = null;
+        setUnavailableAudioIds(prev => ({ ...prev, [interactionId]: true }));
+      };
+
+      let audioPayload = options?.forceRefresh
+        ? undefined
+        : options?.preloadedAudio || spokenAudioCacheRef.current.get(interactionId);
+
+      if (audioPayload?.audioBase64) {
+        spokenAudioCacheRef.current.set(interactionId, audioPayload);
+      } else {
+        const cleanSpeechText = sanitizeTextForSpeech(fullText) || fullText;
+        const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
+        if (!cleanSpeechText || !isOnline) {
+          markAudioUnavailable();
+          return;
+        }
+
+        setSynthesizingInteractionId(interactionId);
+        const res = await notifyQuatNativeAudioDialog({
+          action: 'speak',
+          textToSpeak: cleanSpeechText,
+        });
+
+        if (
+          speakingSessionIdRef.current !== sessionToken ||
+          currentQuestionIdRef.current !== questionIdAtStart
+        ) {
+          return;
+        }
+
+        setSynthesizingInteractionId(null);
+
+        if (res.error || !res.audioBase64) {
+          markAudioUnavailable();
+          return;
+        }
+
+        audioPayload = {
+          audioBase64: res.audioBase64,
+          mimeType: res.mimeType || 'audio/wav',
+        };
+        spokenAudioCacheRef.current.set(interactionId, audioPayload);
+      }
+
+      if (
+        speakingSessionIdRef.current !== sessionToken ||
+        currentQuestionIdRef.current !== questionIdAtStart
+      ) {
         return;
       }
 
-      stopSpeechCleanup();
-
       try {
-        const utterance = new SpeechSynthesisUtterance(fullText);
-        utterance.lang = 'pt-BR';
-        utterance.rate = 1.04;
-
-        const voices = window.speechSynthesis.getVoices();
-        const ptVoice =
-          voices.find(v => v.lang.toLowerCase().includes('pt-br') && v.name.toLowerCase().includes('natural')) ||
-          voices.find(v => v.lang.toLowerCase().includes('pt-br')) ||
-          voices.find(v => v.lang.toLowerCase().startsWith('pt'));
-        if (ptVoice) {
-          utterance.voice = ptVoice;
+        const blobUrl = base64AudioToBlobUrl(audioPayload.audioBase64, audioPayload.mimeType);
+        if (
+          speakingSessionIdRef.current !== sessionToken ||
+          currentQuestionIdRef.current !== questionIdAtStart
+        ) {
+          URL.revokeObjectURL(blobUrl);
+          return;
         }
+
+        activeAudioUrlRef.current = blobUrl;
+        const audio = new Audio(blobUrl);
+        activeAudioElementRef.current = audio;
 
         fullSpokenTextRef.current = fullText;
         spokenCharIndexRef.current = 0;
-        boundaryFiredRef.current = false;
-        speechStartTimeRef.current = Date.now();
-        speechAccumulatedMsRef.current = 0;
         activeInteractionIdRef.current = interactionId;
 
-        const estimatedTotalMs = Math.max(1500, (fullText.length / 14.5) * 1000);
-
-        utterance.onboundary = (event: SpeechSynthesisEvent) => {
-          if (typeof event.charIndex === 'number') {
-            boundaryFiredRef.current = true;
-            const len = typeof event.charLength === 'number' && event.charLength > 0 ? event.charLength : 6;
-            spokenCharIndexRef.current = Math.min(fullText.length, event.charIndex + len);
-          }
+        audio.ontimeupdate = () => {
+          if (speakingSessionIdRef.current !== sessionToken) return;
+          const totalText = fullSpokenTextRef.current;
+          if (!totalText) return;
+          const duration =
+            Number.isFinite(audio.duration) && audio.duration > 0
+              ? audio.duration
+              : Math.max(1.5, totalText.length / 14.5);
+          const ratio = Math.min(1, Math.max(0, audio.currentTime / duration));
+          spokenCharIndexRef.current = Math.max(
+            spokenCharIndexRef.current,
+            Math.floor(ratio * totalText.length)
+          );
         };
 
-        utterance.onstart = () => {
-          speechStartTimeRef.current = Date.now();
-          setIsSpeaking(true);
-          setIsSpeechPaused(false);
-          setActiveSpeakingInteractionId(interactionId);
-
-          clearFallbackTimer();
-          fallbackTimerRef.current = setInterval(() => {
-            if (boundaryFiredRef.current) return;
-            const now = Date.now();
-            const elapsed = speechAccumulatedMsRef.current + (now - speechStartTimeRef.current);
-            const ratio = Math.min(1, elapsed / estimatedTotalMs);
-            spokenCharIndexRef.current = Math.max(
-              spokenCharIndexRef.current,
-              Math.floor(ratio * fullText.length)
-            );
-          }, 120);
-        };
-
-        utterance.onend = () => {
+        audio.onended = () => {
+          if (speakingSessionIdRef.current !== sessionToken) return;
           spokenCharIndexRef.current = fullText.length;
-          clearFallbackTimer();
+          revokeActiveAudioUrl();
+          activeAudioElementRef.current = null;
           setIsSpeaking(false);
           setIsSpeechPaused(false);
           setActiveSpeakingInteractionId(null);
           activeInteractionIdRef.current = null;
         };
 
-        utterance.onerror = () => {
-          clearFallbackTimer();
-          setIsSpeaking(false);
-          setIsSpeechPaused(false);
-          setActiveSpeakingInteractionId(null);
-          activeInteractionIdRef.current = null;
+        audio.onerror = () => {
+          if (speakingSessionIdRef.current !== sessionToken) return;
+          revokeActiveAudioUrl();
+          activeAudioElementRef.current = null;
+          markAudioUnavailable();
         };
 
         setIsSpeaking(true);
         setIsSpeechPaused(false);
         setActiveSpeakingInteractionId(interactionId);
-        window.speechSynthesis.speak(utterance);
+
+        await audio.play();
       } catch (err) {
-        console.warn('[QuestionVoiceBar] SpeechSynthesis error:', err);
-        setIsSpeaking(false);
+        console.warn('[QuestionVoiceBar] Gemini neural audio playback error:', err);
+        revokeActiveAudioUrl();
+        activeAudioElementRef.current = null;
+        markAudioUnavailable();
       }
     },
-    [stopSpeechCleanup]
+    [stopSpeechCleanup, revokeActiveAudioUrl]
   );
 
   // Snap partial text cleanly to a word boundary
@@ -448,18 +544,23 @@ export const QuestionVoiceBar: React.FC<QuestionVoiceBarProps> = ({
     startMicrophoneSession();
   };
 
-  // Pause / Resume Assistant Speech
+  // Pause / Resume Assistant Neural Audio
   const handleTogglePauseSpeech = (e: React.MouseEvent) => {
     e.stopPropagation();
-    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+    const audio = activeAudioElementRef.current;
+    if (!audio) return;
 
     if (isSpeechPaused) {
-      speechStartTimeRef.current = Date.now();
-      window.speechSynthesis.resume();
-      setIsSpeechPaused(false);
+      audio
+        .play()
+        .then(() => {
+          setIsSpeechPaused(false);
+        })
+        .catch(() => {
+          stopSpeechCleanup();
+        });
     } else {
-      speechAccumulatedMsRef.current += Date.now() - speechStartTimeRef.current;
-      window.speechSynthesis.pause();
+      audio.pause();
       setIsSpeechPaused(true);
     }
   };
@@ -487,8 +588,9 @@ export const QuestionVoiceBar: React.FC<QuestionVoiceBarProps> = ({
     }
   };
 
-  // Submit student's reasoning to Quat
+  // Submit student's reasoning to Quat (via voice or text input)
   const handleSubmitReasoning = async () => {
+    if (isLoadingAI) return;
     const fullStudentText = [draftTranscript, interimTranscript].filter(Boolean).join(' ').trim();
     if (!fullStudentText) {
       setErrorBanner('Fale ou digite seu raciocínio antes de enviar para o Quat.');
@@ -501,6 +603,10 @@ export const QuestionVoiceBar: React.FC<QuestionVoiceBarProps> = ({
     }
 
     stopRecordingInternal();
+    setDraftTranscript('');
+    setInterimTranscript('');
+    finalizedTranscriptRef.current = '';
+    setPendingStudentText(fullStudentText);
     setIsLoadingAI(true);
     setErrorBanner(null);
     setIsHistoryExpanded(true);
@@ -537,16 +643,30 @@ export const QuestionVoiceBar: React.FC<QuestionVoiceBarProps> = ({
         wasInterrupted: false,
       });
 
+      setPendingStudentText(null);
       setInteractions(thread.interactions);
       setIsHistoryExpanded(true);
-      setDraftTranscript('');
-      setInterimTranscript('');
-      finalizedTranscriptRef.current = '';
 
-      speakResponseAloud(result.spoken_response, interaction.id);
+      if (result.audioBase64 && !result.audioError) {
+        speakResponseAloud(result.spoken_response, interaction.id, {
+          preloadedAudio: {
+            audioBase64: result.audioBase64,
+            mimeType: result.mimeType || 'audio/wav',
+          },
+        });
+      } else {
+        setUnavailableAudioIds(prev => ({ ...prev, [interaction.id]: true }));
+      }
     } catch (err: any) {
       console.error('[QuestionVoiceBar] Error calling AI:', err);
-      setErrorBanner(err?.message || 'Erro ao consultar o Quat. Verifique suas chaves de API.');
+      setPendingStudentText(null);
+      setDraftTranscript(prev => {
+        if (prev.trim()) return prev;
+        finalizedTranscriptRef.current = fullStudentText;
+        return fullStudentText;
+      });
+      const friendly = mapToStudentFriendlyError(err);
+      setErrorBanner(friendly.displayText);
     } finally {
       setIsLoadingAI(false);
     }
@@ -554,14 +674,13 @@ export const QuestionVoiceBar: React.FC<QuestionVoiceBarProps> = ({
 
   const combinedLiveTranscript = [draftTranscript, interimTranscript].filter(Boolean).join(' ');
 
-  const isFloatingPopupOpen =
-    isRecording ||
-    isLoadingAI ||
-    isSpeaking ||
-    isHistoryExpanded ||
-    draftTranscript.length > 0 ||
-    interimTranscript.length > 0 ||
-    Boolean(errorBanner);
+  const isFloatingPopupOpen = isHistoryExpanded || isRecording || isLoadingAI;
+
+  // Keep conversation scrolled to newest exchange when popup is open
+  useEffect(() => {
+    if (!isFloatingPopupOpen) return;
+    historyEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [isFloatingPopupOpen, interactions.length, pendingStudentText, isLoadingAI]);
 
   const handleCloseFloatingPopup = () => {
     if (isRecording && !combinedLiveTranscript.trim()) {
@@ -708,21 +827,20 @@ export const QuestionVoiceBar: React.FC<QuestionVoiceBarProps> = ({
           <div className="flex items-center gap-2 shrink-0">
             {renderMicControls(false)}
 
-            {interactions.length > 0 && (
-              <button
-                type="button"
-                onClick={() => setIsHistoryExpanded(prev => !prev)}
-                className="inline-flex items-center gap-1 px-2.5 py-2 rounded-xl bg-surface hover:bg-surface-hover text-secondary hover:text-primary border border-border text-xs font-medium transition-colors cursor-pointer"
-                title={isFloatingPopupOpen ? 'Minimizar janela do Quat' : 'Abrir janela do Quat'}
-              >
-                <MessageSquare className="w-3.5 h-3.5 text-accent" />
-                {isFloatingPopupOpen ? (
-                  <ChevronDown className="w-3.5 h-3.5" />
-                ) : (
-                  <ChevronUp className="w-3.5 h-3.5" />
-                )}
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={() => setIsHistoryExpanded(prev => !prev)}
+              className="inline-flex items-center gap-1 px-2.5 py-2 rounded-xl bg-surface hover:bg-surface-hover text-secondary hover:text-primary border border-border text-xs font-medium transition-colors cursor-pointer"
+              title={isFloatingPopupOpen ? 'Minimizar janela do Quat' : 'Abrir janela do Quat'}
+              aria-label={isFloatingPopupOpen ? 'Minimizar janela do Quat' : 'Abrir janela do Quat'}
+            >
+              <MessageSquare className="w-3.5 h-3.5 text-accent" />
+              {isFloatingPopupOpen ? (
+                <ChevronDown className="w-3.5 h-3.5" />
+              ) : (
+                <ChevronUp className="w-3.5 h-3.5" />
+              )}
+            </button>
           </div>
         </div>
       </div>
@@ -746,7 +864,7 @@ export const QuestionVoiceBar: React.FC<QuestionVoiceBarProps> = ({
             initial={{ opacity: 0, scale: 0.95, y: 12 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             transition={{ type: 'spring', stiffness: 360, damping: 28 }}
-            className="fixed bottom-5 right-5 z-30 w-[340px] sm:w-[370px] max-w-[calc(100vw-24px)] max-h-[420px] flex flex-col rounded-2xl border border-border bg-surface shadow-2xl overflow-hidden select-none"
+            className="fixed bottom-5 right-5 z-30 w-[340px] sm:w-[380px] max-w-[calc(100vw-24px)] h-[440px] max-h-[calc(100dvh-32px)] flex flex-col rounded-2xl border border-border bg-surface shadow-2xl overflow-hidden select-none"
           >
             {/* Draggable Header Bar */}
             <div
@@ -769,8 +887,35 @@ export const QuestionVoiceBar: React.FC<QuestionVoiceBarProps> = ({
                 </span>
               </div>
 
-              <div className="flex items-center gap-1.5 shrink-0">
-                <GripHorizontal className="w-3.5 h-3.5 text-muted pointer-events-none" />
+              <div className="flex items-center gap-1 shrink-0">
+                {isSpeaking && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={handleTogglePauseSpeech}
+                      className="p-1.5 rounded-lg bg-surface hover:bg-surface-hover text-primary border border-border transition-colors cursor-pointer"
+                      title={isSpeechPaused ? 'Retomar fala do Quat' : 'Pausar fala do Quat'}
+                      aria-label={isSpeechPaused ? 'Retomar fala' : 'Pausar fala'}
+                    >
+                      {isSpeechPaused ? (
+                        <Play className="w-3 h-3 fill-current text-accent" />
+                      ) : (
+                        <Pause className="w-3 h-3" />
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleStopSpeech}
+                      className="p-1.5 rounded-lg bg-danger-bg hover:opacity-90 text-danger border border-danger-border transition-colors cursor-pointer"
+                      title="Parar fala do Quat"
+                      aria-label="Parar fala"
+                    >
+                      <Square className="w-3 h-3 fill-current" />
+                    </button>
+                  </>
+                )}
+
+                <GripHorizontal className="w-3.5 h-3.5 text-muted pointer-events-none mx-0.5" />
                 <button
                   type="button"
                   onClick={handleCloseFloatingPopup}
@@ -783,23 +928,8 @@ export const QuestionVoiceBar: React.FC<QuestionVoiceBarProps> = ({
               </div>
             </div>
 
-            {/* Scrollable Body of the Floating Popup */}
-            <div className="flex-1 overflow-y-auto p-3.5 space-y-3">
-              {/* Top Action Row inside Popup: Mic / Pause / Stop Controls */}
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-[11px] text-secondary font-medium truncate">
-                  {isSpeaking
-                    ? isSpeechPaused
-                      ? 'Fala pausada'
-                      : 'Respondendo em voz alta...'
-                    : isRecording
-                    ? 'Microfone ativo'
-                    : 'Explique ou digite seu raciocínio'}
-                </span>
-                {renderMicControls(true)}
-              </div>
-
-              {/* Error / Permission Notice (Automatically cleared when closing popup or starting a valid recording) */}
+            {/* Single Scrollable Conversation History Area (Flat, no nested card borders) */}
+            <div className="flex-1 min-h-0 overflow-y-auto px-3.5 py-3 space-y-4">
               {errorBanner && (
                 <div className="p-2.5 rounded-xl bg-danger-bg border border-danger-border text-danger text-xs flex items-start gap-2">
                   <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
@@ -807,184 +937,234 @@ export const QuestionVoiceBar: React.FC<QuestionVoiceBarProps> = ({
                 </div>
               )}
 
-              {/* Live Streaming Transcript / Clean Reasoning Input Box */}
-              {(isRecording ||
-                draftTranscript.length > 0 ||
-                interimTranscript.length > 0 ||
-                Boolean(errorBanner) ||
-                interactions.length === 0) && (
-                <div className="p-3 rounded-xl bg-surface-subtle border border-border space-y-2.5">
-                  {isRecording ? (
-                    <div className="flex items-center justify-between gap-2 text-[11px] text-secondary">
-                      <span className="inline-flex items-center gap-2 font-semibold">
-                        <span className="ml-1 relative flex h-2.5 w-2.5 items-center justify-center shrink-0">
-                          <span className="absolute inline-flex h-full w-full rounded-full bg-danger opacity-75 animate-ping" />
-                          <span className="relative inline-flex rounded-full h-2 w-2 bg-danger" />
-                        </span>
-                        <span>Ouvindo — sua fala aparecerá aqui em tempo real</span>
-                      </span>
-                      <button
-                        type="button"
-                        onClick={handleCancelRecording}
-                        className="inline-flex items-center gap-1 text-muted hover:text-danger transition-colors cursor-pointer shrink-0"
-                      >
-                        <X className="w-3 h-3" />
-                        <span>Cancelar</span>
-                      </button>
+              {interactions.length === 0 && !pendingStudentText && !isLoadingAI && (
+                <p className="text-xs text-muted text-center py-6 px-2 leading-relaxed">
+                  Explique como você pensou nesta questão falando no microfone ou digitando abaixo.
+                </p>
+              )}
+
+              {interactions.map((item) => {
+                const isReasoningOpen = Boolean(expandedReasoningIds[item.id]);
+                const isContextOpen = Boolean(expandedContextIds[item.id]);
+                const isThisItemSpeaking = isSpeaking && activeSpeakingInteractionId === item.id;
+                const isThisItemSynthesizing = synthesizingInteractionId === item.id;
+                const isAudioUnavailable = Boolean(unavailableAudioIds[item.id]);
+
+                return (
+                  <div key={item.id} className="space-y-2 text-xs">
+                    {/* Student message bubble aligned right */}
+                    <div className="flex justify-end">
+                      <div className="max-w-[85%] rounded-2xl rounded-br-sm bg-surface-subtle px-3 py-2 text-primary theme-text-primary leading-relaxed select-text">
+                        {item.studentTranscript}
+                      </div>
                     </div>
-                  ) : (
-                    combinedLiveTranscript.length > 0 && (
-                      <div className="flex items-center justify-end text-[11px]">
+
+                    {/* Quat response directly below without extra bordered container */}
+                    <div className="space-y-1.5">
+                      <p className="text-primary theme-text-primary leading-relaxed select-text">
+                        {item.aiSpokenResponse}
+                      </p>
+
+                      {isAudioUnavailable && !isThisItemSynthesizing && !isThisItemSpeaking && (
+                        <p className="inline-flex items-center gap-1.5 text-[11px] text-muted">
+                          <VolumeX className="w-3 h-3 shrink-0" />
+                          <span>Áudio neural indisponível no momento</span>
+                        </p>
+                      )}
+
+                      {/* Single subtle action line */}
+                      <div className="flex flex-wrap items-center gap-3 pt-0.5 text-[11px]">
                         <button
                           type="button"
-                          onClick={handleCancelRecording}
-                          className="inline-flex items-center gap-1 text-muted hover:text-danger transition-colors cursor-pointer"
+                          disabled={isThisItemSynthesizing}
+                          onClick={() =>
+                            speakResponseAloud(item.aiSpokenResponse, item.id, {
+                              forceRefresh: isAudioUnavailable,
+                            })
+                          }
+                          className="inline-flex items-center gap-1 text-secondary hover:text-primary font-medium transition-colors cursor-pointer disabled:opacity-60"
+                          title={
+                            isAudioUnavailable
+                              ? 'Tentar ouvir novamente'
+                              : 'Ouvir esta resposta com voz neural'
+                          }
                         >
-                          <X className="w-3 h-3" />
-                          <span>Limpar</span>
+                          {isThisItemSynthesizing ? (
+                            <Loader2 className="w-3 h-3 text-accent animate-spin" />
+                          ) : isAudioUnavailable ? (
+                            <RotateCcw className="w-3 h-3 text-accent" />
+                          ) : (
+                            <Volume2
+                              className={`w-3 h-3 ${isThisItemSpeaking ? 'text-accent animate-pulse' : ''}`}
+                            />
+                          )}
+                          <span>
+                            {isThisItemSynthesizing
+                              ? 'Gerando voz...'
+                              : isThisItemSpeaking
+                              ? 'Falando...'
+                              : isAudioUnavailable
+                              ? 'Tentar ouvir'
+                              : 'Ouvir'}
+                          </span>
                         </button>
+
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setExpandedReasoningIds(prev => ({
+                              ...prev,
+                              [item.id]: !prev[item.id],
+                            }))
+                          }
+                          className="inline-flex items-center gap-1 font-medium text-accent hover:underline cursor-pointer"
+                        >
+                          <Brain className="w-3 h-3" />
+                          <span>{isReasoningOpen ? 'Ocultar Análise' : 'Ver Análise'}</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setExpandedContextIds(prev => ({
+                              ...prev,
+                              [item.id]: !prev[item.id],
+                            }))
+                          }
+                          className="inline-flex items-center gap-1 font-medium text-muted hover:text-primary transition-colors cursor-pointer"
+                        >
+                          <FileText className="w-3 h-3" />
+                          <span>{isContextOpen ? 'Ocultar Questão' : 'Referência'}</span>
+                        </button>
+
+                        <span className="ml-auto text-[10px] text-muted">
+                          {item.wasInterrupted ? 'Interrompido · ' : ''}
+                          {formatRelativeTime(item.updatedAt || item.createdAt)}
+                        </span>
                       </div>
-                    )
+
+                      {isReasoningOpen && (
+                        <div className="pl-2.5 border-l-2 border-accent/40 text-secondary text-[11px] leading-relaxed select-text">
+                          {item.aiInternalReasoning}
+                        </div>
+                      )}
+
+                      {isContextOpen && (
+                        <div className="pl-2.5 border-l-2 border-border text-[10px] text-secondary font-mono leading-relaxed select-text">
+                          {item.questionStemAndAnswer}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+
+              {pendingStudentText && (
+                <div className="space-y-2 text-xs">
+                  <div className="flex justify-end">
+                    <div className="max-w-[85%] rounded-2xl rounded-br-sm bg-surface-subtle px-3 py-2 text-primary theme-text-primary leading-relaxed select-text">
+                      {pendingStudentText}
+                    </div>
+                  </div>
+                  {isLoadingAI && (
+                    <div className="flex items-center gap-2 text-xs text-muted">
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-accent" />
+                      <span>Quat analisando seu raciocínio...</span>
+                    </div>
                   )}
+                </div>
+              )}
 
-                  <textarea
-                    rows={2}
-                    value={combinedLiveTranscript}
-                    onChange={(e) => {
-                      finalizedTranscriptRef.current = e.target.value;
-                      setDraftTranscript(e.target.value);
-                      setInterimTranscript('');
-                    }}
-                    placeholder="Fale em voz alta ou digite como você pensou nesta questão..."
-                    className="w-full rounded-lg p-2 text-xs bg-surface border border-border text-primary placeholder:text-muted focus:outline-none focus:border-accent resize-none leading-relaxed"
-                  />
+              <div ref={historyEndRef} />
+            </div>
 
+            {/* Always-Visible Fixed Footer Input Bar */}
+            <div className="shrink-0 border-t border-border bg-surface-subtle px-3 py-2.5 space-y-1.5">
+              {isRecording && (
+                <div className="flex items-center justify-between gap-2 text-[11px] text-secondary px-0.5">
+                  <span className="inline-flex items-center gap-1.5 font-medium">
+                    <span className="relative flex h-2 w-2 items-center justify-center shrink-0">
+                      <span className="absolute inline-flex h-full w-full rounded-full bg-danger opacity-75 animate-ping" />
+                      <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-danger" />
+                    </span>
+                    <span>Ouvindo...</span>
+                  </span>
                   <button
                     type="button"
-                    onClick={handleSubmitReasoning}
-                    disabled={isLoadingAI || !combinedLiveTranscript.trim()}
-                    className="w-full py-2 px-3 rounded-lg theme-btn-accent font-semibold text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-xs disabled:opacity-40 disabled:cursor-not-allowed"
+                    onClick={handleCancelRecording}
+                    className="inline-flex items-center gap-1 text-muted hover:text-danger transition-colors cursor-pointer"
                   >
-                    {isLoadingAI ? (
-                      <>
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        <span>Analisando...</span>
-                      </>
-                    ) : (
-                      <>
-                        <Send className="w-3.5 h-3.5" />
-                        <span>Enviar raciocínio para o Quat</span>
-                      </>
-                    )}
+                    <X className="w-3 h-3" />
+                    <span>Cancelar</span>
                   </button>
                 </div>
               )}
 
-              {/* Compact List of Socratic Interactions for Current Question */}
-              {interactions.length > 0 && (
-                <div className="space-y-2">
-                  {interactions.map((item, idx) => {
-                    const isReasoningOpen = Boolean(expandedReasoningIds[item.id]);
-                    const isContextOpen = Boolean(expandedContextIds[item.id]);
-                    const isThisItemSpeaking = isSpeaking && activeSpeakingInteractionId === item.id;
+              <div className="flex items-end gap-1.5">
+                <textarea
+                  rows={2}
+                  value={combinedLiveTranscript}
+                  onChange={(e) => {
+                    finalizedTranscriptRef.current = e.target.value;
+                    setDraftTranscript(e.target.value);
+                    setInterimTranscript('');
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      if (!isLoadingAI && combinedLiveTranscript.trim()) {
+                        handleSubmitReasoning();
+                      }
+                    }
+                  }}
+                  placeholder="Digite ou fale seu raciocínio... (Enter para enviar)"
+                  className="flex-1 min-w-0 rounded-xl px-2.5 py-2 text-xs bg-surface border border-border text-primary placeholder:text-muted focus:outline-none focus:border-accent resize-none leading-relaxed"
+                />
 
-                    return (
-                      <div
-                        key={item.id}
-                        className="rounded-xl border border-border bg-surface-subtle p-3 space-y-2 text-xs"
-                      >
-                        {/* Interaction Header */}
-                        <div className="flex flex-wrap items-center justify-between gap-1.5 pb-1.5 border-b border-border">
-                          <div className="flex flex-wrap items-center gap-1">
-                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-accent-subtle text-accent border border-accent-subtle-border font-semibold text-[10px]">
-                              <MessageSquare className="w-2.5 h-2.5" />
-                              <span>Quat #{idx + 1}</span>
-                            </span>
-                            {item.wasInterrupted && (
-                              <span className="px-1.5 py-0.5 rounded bg-surface text-muted border border-border text-[9px] font-medium">
-                                Interrompido
-                              </span>
-                            )}
-                          </div>
-                          <span className="text-[10px] text-muted">
-                            {formatRelativeTime(item.updatedAt || item.createdAt)}
-                          </span>
-                        </div>
+                <button
+                  type="button"
+                  onClick={handleMicButtonClick}
+                  disabled={isLoadingAI}
+                  className={`p-2.5 rounded-xl border transition-colors cursor-pointer shrink-0 disabled:opacity-50 ${
+                    isRecording
+                      ? 'bg-danger text-danger-contrast border-danger-border'
+                      : isSpeaking
+                      ? 'bg-accent text-accent-contrast border-accent-subtle-border'
+                      : 'bg-surface hover:bg-surface-hover text-secondary hover:text-primary border-border'
+                  }`}
+                  title={
+                    isSpeaking
+                      ? 'Interromper fala do Quat e iniciar gravação'
+                      : isRecording
+                      ? 'Cancelar gravação de voz'
+                      : 'Falar raciocínio no microfone'
+                  }
+                  aria-label={
+                    isSpeaking
+                      ? 'Interromper e falar'
+                      : isRecording
+                      ? 'Cancelar gravação'
+                      : 'Falar no microfone'
+                  }
+                >
+                  <Mic className={`w-4 h-4 ${isRecording ? 'animate-pulse' : ''}`} />
+                </button>
 
-                        {/* Student Transcript */}
-                        <div className="p-2 rounded-lg bg-surface border border-border space-y-0.5">
-                          <div className="text-[9px] font-bold uppercase tracking-wider text-muted">
-                            Sua Fala
-                          </div>
-                          <p className="text-primary theme-text-primary leading-relaxed select-text text-[11px]">
-                            “{item.studentTranscript}”
-                          </p>
-                        </div>
-
-                        {/* Quat Response */}
-                        <div className="p-2.5 rounded-lg bg-surface border border-border space-y-1.5">
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="text-[10px] font-bold uppercase tracking-wider text-accent flex items-center gap-1">
-                              <MessageSquare className="w-3 h-3" />
-                              <span>Resposta</span>
-                            </span>
-
-                            <button
-                              type="button"
-                              onClick={() => speakResponseAloud(item.aiSpokenResponse, item.id)}
-                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-surface-subtle hover:bg-surface-hover text-secondary hover:text-primary border border-border text-[10px] font-medium transition-colors cursor-pointer"
-                              title="Ouvir esta resposta novamente"
-                            >
-                              <Volume2 className={`w-3 h-3 ${isThisItemSpeaking ? 'text-accent animate-pulse' : ''}`} />
-                              <span>{isThisItemSpeaking ? 'Falando...' : 'Ouvir'}</span>
-                            </button>
-                          </div>
-                          <p className="text-primary theme-text-primary text-xs leading-relaxed font-medium select-text">
-                            {item.aiSpokenResponse}
-                          </p>
-                        </div>
-
-                        {/* Expandable Details (Reasoning & Context) */}
-                        <div className="flex flex-wrap items-center gap-3 pt-0.5">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setExpandedReasoningIds(prev => ({ ...prev, [item.id]: !prev[item.id] }))
-                            }
-                            className="inline-flex items-center gap-1 text-[10px] font-semibold text-accent hover:underline cursor-pointer"
-                          >
-                            <Brain className="w-3 h-3" />
-                            <span>{isReasoningOpen ? 'Ocultar Análise' : 'Ver Análise'}</span>
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setExpandedContextIds(prev => ({ ...prev, [item.id]: !prev[item.id] }))
-                            }
-                            className="inline-flex items-center gap-1 text-[10px] font-medium text-muted hover:text-primary transition-colors cursor-pointer"
-                          >
-                            <FileText className="w-3 h-3" />
-                            <span>{isContextOpen ? 'Ocultar Questão' : 'Referência'}</span>
-                          </button>
-                        </div>
-
-                        {isReasoningOpen && (
-                          <div className="p-2 rounded-lg bg-accent-subtle border border-accent-subtle-border text-secondary text-[11px] leading-relaxed select-text">
-                            {item.aiInternalReasoning}
-                          </div>
-                        )}
-
-                        {isContextOpen && (
-                          <div className="p-2 rounded-lg bg-surface border border-border text-[10px] text-secondary font-mono leading-relaxed">
-                            {item.questionStemAndAnswer}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
+                <button
+                  type="button"
+                  onClick={handleSubmitReasoning}
+                  disabled={isLoadingAI || !combinedLiveTranscript.trim()}
+                  className="p-2.5 rounded-xl theme-btn-accent transition-all cursor-pointer shrink-0 shadow-xs disabled:opacity-40 disabled:cursor-not-allowed"
+                  title="Enviar raciocínio (Enter)"
+                  aria-label="Enviar mensagem para o Quat"
+                >
+                  {isLoadingAI ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Send className="w-4 h-4" />
+                  )}
+                </button>
+              </div>
             </div>
           </motion.div>,
           document.body
