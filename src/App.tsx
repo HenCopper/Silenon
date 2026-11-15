@@ -305,7 +305,7 @@ export default function App() {
   }, []);
 
   return (
-    <div className="w-full h-[100vh] h-[100dvh] overflow-hidden flex flex-col">
+    <div className="fixed inset-0 h-[100dvh] w-full overflow-hidden flex flex-col">
       {/* Top Minimalist Header */}
       <Header
         currentMode={currentMode}
@@ -373,7 +373,7 @@ export default function App() {
       />
 
       {/* Main Content Area with Independent Scrollable Mode Slides */}
-      <main className="flex-1 min-h-0 w-full flex flex-col overflow-hidden">
+      <main className="flex-1 min-h-0 w-full flex flex-col overflow-y-auto overflow-x-hidden">
         {(() => {
           if (isCarouselMode) {
             return (

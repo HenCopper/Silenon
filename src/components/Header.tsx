@@ -107,7 +107,7 @@ export const Header: React.FC<HeaderProps> = ({
         }
         handleToggleFullscreen();
       }}
-      className="sticky top-0 z-40 w-full min-w-full bg-canvas border-b border-border select-none"
+      className="sticky top-0 z-40 shrink-0 w-full min-w-full pt-[env(safe-area-inset-top)] bg-canvas border-b border-border select-none"
       style={{ boxSizing: 'border-box' }}
       title="Dê dois cliques em qualquer espaço livre da barra superior para alternar tela cheia"
     >
