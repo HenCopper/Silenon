@@ -707,6 +707,59 @@ export class LocalStorageManager {
     return databases.flatMap(db => db.questions);
   }
 
+  static updateQuestionResolution(
+    questionId: number,
+    contentHash: string | undefined,
+    updates: {
+      cot_reasoning: string;
+      pedagogical_explanation: string;
+      optionComments?: Record<string, string>;
+    },
+    existingDatabases?: QuestionDatabase[]
+  ): QuestionDatabase[] {
+    const databases = existingDatabases ? [...existingDatabases] : this.getDatabases();
+    let changed = false;
+
+    const updatedDatabases = databases.map((db) => {
+      let dbChanged = false;
+      const nextQuestions = db.questions.map((q) => {
+        const matchesId = q.sequence_id === questionId;
+        const matchesHash = Boolean(
+          contentHash && q.content_hash && q.content_hash === contentHash
+        );
+        if (!matchesId && !matchesHash) return q;
+
+        dbChanged = true;
+        changed = true;
+        const nextOptions = Array.isArray(q.options)
+          ? q.options.map((opt) => {
+              const letterKey = String(opt.letter || '').trim().toUpperCase();
+              const newComment = updates.optionComments?.[letterKey]?.trim();
+              return newComment ? { ...opt, why_wrong_or_right: newComment } : opt;
+            })
+          : q.options;
+
+        return {
+          ...q,
+          options: nextOptions,
+          resolution: {
+            ...q.resolution,
+            cot_reasoning: updates.cot_reasoning || q.resolution.cot_reasoning,
+            pedagogical_explanation:
+              updates.pedagogical_explanation || q.resolution.pedagogical_explanation,
+          },
+        };
+      });
+
+      return dbChanged ? { ...db, questions: nextQuestions } : db;
+    });
+
+    if (changed) {
+      this.saveDatabases(updatedDatabases);
+    }
+    return updatedDatabases;
+  }
+
   // Custom Bank (Legacy compatibility)
   static getCustomBank(): Question[] | null {
     try {

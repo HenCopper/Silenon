@@ -27,6 +27,11 @@ import { ResolutionSection } from './ResolutionSection';
 import { QuestionMediaRenderer } from './QuestionMediaRenderer';
 import { QuestionVoiceBar } from './QuestionVoiceBar';
 import { DisableTipsModal, useTipsPreference } from './DisableTipsModal';
+import {
+  hasAnyAIKey,
+  needsAutoResolutionGeneration,
+  autoGenerateAndPersistQuestionResolution,
+} from '../lib/aiOrchestrator';
 
 const LazyBYOKModal = React.lazy(() =>
   import('./BYOKModal').then((m) => ({ default: m.BYOKModal }))
@@ -197,6 +202,13 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
   const { showTips } = useTipsPreference();
   // Review strikes when gabarito is hidden on an already answered question
   const [reviewStrikes, setReviewStrikes] = useState<string[]>([]);
+  const [isGeneratingResolution, setIsGeneratingResolution] = useState<boolean>(false);
+  const [localResolutionPatch, setLocalResolutionPatch] = useState<{
+    questionKey: string;
+    cot_reasoning: string;
+    pedagogical_explanation: string;
+    option_comments: Record<string, string>;
+  } | null>(null);
 
   // Ref estável para consulta e submissão do tempo gasto sem forçar re-renderização a cada segundo
   const activeTimeElapsedRef = useRef<number>(initialElapsedSeconds || 0);
@@ -289,6 +301,74 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
   useEffect(() => {
     onUpdateElapsedSecondsRef.current = onUpdateElapsedSeconds;
   }, [onUpdateElapsedSeconds]);
+
+  const activeQuestionKey = `${question?.content_hash || ''}::${question?.sequence_id ?? ''}`;
+
+  // Auto-generate Destrinchando & Comentário Pedagógico silently in background when missing
+  useEffect(() => {
+    if (!question) return;
+    if (!needsAutoResolutionGeneration(question)) {
+      setIsGeneratingResolution(false);
+      return;
+    }
+    if (!hasAnyAIKey()) {
+      setIsGeneratingResolution(false);
+      return;
+    }
+
+    let cancelled = false;
+    setIsGeneratingResolution(true);
+
+    autoGenerateAndPersistQuestionResolution(question)
+      .then((result) => {
+        if (cancelled) return;
+        if (result) {
+          setLocalResolutionPatch({
+            questionKey: activeQuestionKey,
+            cot_reasoning: result.cot_reasoning,
+            pedagogical_explanation: result.pedagogical_explanation,
+            option_comments: result.optionComments,
+          });
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsGeneratingResolution(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeQuestionKey,
+    question,
+    showResolution,
+    isLocalBYOKOpen,
+  ]);
+
+  const effectiveResolution = useMemo(() => {
+    if (localResolutionPatch && localResolutionPatch.questionKey === activeQuestionKey) {
+      return {
+        ...question.resolution,
+        cot_reasoning: localResolutionPatch.cot_reasoning || question.resolution.cot_reasoning,
+        pedagogical_explanation:
+          localResolutionPatch.pedagogical_explanation || question.resolution.pedagogical_explanation,
+      };
+    }
+    return question.resolution;
+  }, [question.resolution, localResolutionPatch, activeQuestionKey]);
+
+  const effectiveOptions = useMemo(() => {
+    if (localResolutionPatch && localResolutionPatch.questionKey === activeQuestionKey) {
+      return (question.options || []).map((opt) => {
+        const key = String(opt.letter || '').trim().toUpperCase();
+        const comment = localResolutionPatch.option_comments[key];
+        return comment ? { ...opt, why_wrong_or_right: comment } : opt;
+      });
+    }
+    return question.options;
+  }, [question.options, localResolutionPatch, activeQuestionKey]);
 
   // Synchronize when question changes or answer is provided
   useEffect(() => {
@@ -917,7 +997,8 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
       {/* Resolution & Commentary Section */}
       {isShowingOfficialResolution && (
         <ResolutionSection
-          resolution={question.resolution}
+          resolution={effectiveResolution}
+          options={effectiveOptions}
           metadata={question.metadata}
           isCorrect={true}
           selectedLetter={lastAnswer?.selected_letter || selectedLetter}
@@ -925,6 +1006,7 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
           onRateSRS={onRateSRS}
           note={bookmarkData?.note || ''}
           onSaveNote={onSaveNote}
+          isGenerating={isGeneratingResolution}
         />
       )}
 

@@ -543,13 +543,13 @@ export const BYOKModal: React.FC<BYOKModalProps> = ({
               </div>
 
               {/* Bottom Actions: Tutorial Buttons + Save */}
-              <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 pt-2 border-t border-border">
-                <div className="flex flex-wrap items-center gap-2">
+              <div className="flex flex-col gap-3 pt-2 border-t border-border">
+                <div className="grid grid-cols-2 gap-3 w-full">
                   <a
                     href={tutorialUrl}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-surface-subtle hover:bg-surface-hover text-secondary hover:text-primary border border-border text-xs font-medium transition-colors cursor-pointer"
+                    className="w-full flex items-center justify-center gap-2 px-3.5 py-2.5 rounded-xl bg-surface-subtle hover:bg-surface-hover text-secondary hover:text-primary border border-border text-xs font-medium text-center transition-colors cursor-pointer"
                     title="Assistir tutorial da chave Gemini no YouTube"
                   >
                     <GeminiIcon className="w-3.5 h-3.5 shrink-0" />
@@ -560,7 +560,7 @@ export const BYOKModal: React.FC<BYOKModalProps> = ({
                     href={GROQ_TUTORIAL_URL}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-surface-subtle hover:bg-surface-hover text-secondary hover:text-primary border border-border text-xs font-medium transition-colors cursor-pointer"
+                    className="w-full flex items-center justify-center gap-2 px-3.5 py-2.5 rounded-xl bg-surface-subtle hover:bg-surface-hover text-secondary hover:text-primary border border-border text-xs font-medium text-center transition-colors cursor-pointer"
                     title="Assistir tutorial da chave Groq no YouTube"
                   >
                     <GroqIcon className="w-3.5 h-3.5 shrink-0" />
@@ -572,7 +572,7 @@ export const BYOKModal: React.FC<BYOKModalProps> = ({
                 <button
                   type="submit"
                   disabled={!canSaveBothKeys || isVaultBusy}
-                  className="inline-flex items-center justify-center gap-2 px-6 py-2.5 rounded-xl theme-btn-accent font-semibold text-xs sm:text-sm transition-all cursor-pointer shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
+                  className="w-full flex items-center justify-center gap-2 px-6 py-2.5 rounded-xl theme-btn-accent font-semibold text-xs sm:text-sm transition-all cursor-pointer shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   {isVaultBusy ? (
                     <Loader2 className="w-4 h-4 animate-spin" />

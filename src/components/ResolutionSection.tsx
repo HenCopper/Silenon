@@ -3,18 +3,20 @@ import {
   CheckCircle2, 
   XCircle, 
   Sparkles, 
-  HelpCircle, 
   ChevronDown, 
   ChevronUp, 
   BrainCircuit, 
   FileEdit, 
-  Save
+  Save,
+  Loader2
 } from 'lucide-react';
-import { QuestionMetadata, QuestionResolution, SRSRating, SRSItem } from '../types/question';
+import { QuestionMetadata, QuestionOption, QuestionResolution, SRSRating, SRSItem } from '../types/question';
+import { isGenericResolutionText } from '../lib/aiOrchestrator';
 import { QuestionMediaRenderer } from './QuestionMediaRenderer';
 
 interface ResolutionSectionProps {
   resolution: QuestionResolution;
+  options?: QuestionOption[];
   metadata?: QuestionMetadata;
   isCorrect: boolean;
   selectedLetter: string;
@@ -22,23 +24,32 @@ interface ResolutionSectionProps {
   onRateSRS?: (rating: SRSRating) => void;
   note: string;
   onSaveNote: (note: string) => void;
+  isGenerating?: boolean;
 }
 
 export const ResolutionSection: React.FC<ResolutionSectionProps> = ({
   resolution,
+  options,
   metadata,
   isCorrect,
   selectedLetter,
   note,
   onSaveNote,
+  isGenerating = false,
 }) => {
   const [showCoT, setShowCoT] = useState(false);
   const [editingNote, setEditingNote] = useState(false);
   const [currentNote, setCurrentNote] = useState(note);
 
-  const cotContent = resolution.cot_reasoning || (resolution as any).chain_of_thought || (resolution as any).raciocinio || (resolution as any).passo_a_passo || (resolution as any).resolucao || '';
-  const pedagogicalContent = resolution.pedagogical_explanation || (resolution as any).explanation || (resolution as any).comentario || (resolution as any).justificativa || '';
-  const deducedAnswer = resolution.deduced_answer || (resolution as any).gabarito || (resolution as any).correct_answer || '';
+  const rawCotContent = resolution.cot_reasoning || (resolution as any).chain_of_thought || (resolution as any).raciocinio || (resolution as any).passo_a_passo || (resolution as any).resolucao || '';
+  const rawPedagogicalContent = resolution.pedagogical_explanation || (resolution as any).explanation || (resolution as any).comentario || (resolution as any).justificativa || '';
+  const cotContent = isGenericResolutionText(rawCotContent) ? '' : rawCotContent;
+  const pedagogicalContent = isGenericResolutionText(rawPedagogicalContent) ? '' : rawPedagogicalContent;
+  const deducedAnswer = (resolution.deduced_answer || (resolution as any).gabarito || (resolution as any).correct_answer || '').toUpperCase();
+
+  const validOptionComments = Array.isArray(options)
+    ? options.filter((opt) => !isGenericResolutionText(opt.why_wrong_or_right))
+    : [];
 
   const habilidadeInep = metadata?.habilidade_inep?.trim() || '';
   const triSummary = (() => {
@@ -126,19 +137,66 @@ export const ResolutionSection: React.FC<ResolutionSectionProps> = ({
         </div>
       )}
 
-      {/* Pedagogical Explanation */}
-      {pedagogicalContent && (
+      {/* Comentário Pedagógico (Curto e direto sobre por que cada alternativa está certa ou errada) */}
+      {(validOptionComments.length > 0 || pedagogicalContent || isGenerating) && (
         <div
           data-question-selectable="true"
-          className="bg-surface-subtle border border-border rounded-lg p-4 space-y-2"
+          className="bg-surface-subtle border border-border rounded-lg p-4 space-y-2.5"
         >
-          <div className="flex items-center gap-1.5 text-accent text-xs font-semibold">
-            <Sparkles className="w-3.5 h-3.5" />
-            <span>Comentário Pedagógico</span>
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5 text-accent text-xs font-semibold">
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>Comentário Pedagógico</span>
+            </div>
+            {isGenerating && validOptionComments.length === 0 && !pedagogicalContent && (
+              <span className="inline-flex items-center gap-1.5 text-[11px] text-muted">
+                <Loader2 className="w-3 h-3 animate-spin text-accent" />
+                <span>Gerando comentários...</span>
+              </span>
+            )}
           </div>
-          <div className="text-primary theme-text-primary text-sm leading-relaxed whitespace-pre-line">
-            {pedagogicalContent}
-          </div>
+
+          {validOptionComments.length > 0 ? (
+            <div className="space-y-1.5">
+              {(options || []).map((opt) => {
+                const comment = !isGenericResolutionText(opt.why_wrong_or_right)
+                  ? opt.why_wrong_or_right.trim()
+                  : '';
+                if (!comment) return null;
+                const isOptCorrect = opt.letter.toUpperCase() === deducedAnswer;
+                const isOptSelected =
+                  selectedLetter && opt.letter.toUpperCase() === selectedLetter.toUpperCase();
+
+                return (
+                  <div
+                    key={opt.letter}
+                    className={`flex items-start gap-2.5 p-2 rounded-lg text-xs sm:text-sm leading-relaxed ${
+                      isOptCorrect
+                        ? 'bg-success-bg/60 border border-success-border/60 text-primary theme-text-primary'
+                        : isOptSelected && !isOptCorrect
+                        ? 'bg-danger-bg/50 border border-danger-border/50 text-primary theme-text-primary'
+                        : 'text-secondary theme-text-secondary'
+                    }`}
+                  >
+                    <span
+                      className={`w-5 h-5 rounded flex items-center justify-center font-bold text-[11px] shrink-0 mt-0.5 ${
+                        isOptCorrect
+                          ? 'bg-success text-success-contrast'
+                          : 'bg-surface border border-border text-secondary'
+                      }`}
+                    >
+                      {opt.letter}
+                    </span>
+                    <span className="flex-1">{comment}</span>
+                  </div>
+                );
+              })}
+            </div>
+          ) : pedagogicalContent ? (
+            <div className="text-primary theme-text-primary text-sm leading-relaxed whitespace-pre-line">
+              {pedagogicalContent}
+            </div>
+          ) : null}
         </div>
       )}
 
@@ -161,7 +219,7 @@ export const ResolutionSection: React.FC<ResolutionSectionProps> = ({
         </div>
       )}
 
-      {/* Chain-of-Thought (Modo Raio-X) */}
+      {/* Destrinchando (Explicação conceitual da pergunta em si, sem revelar o gabarito) */}
       <div className="border border-border rounded-lg overflow-hidden">
         <button
           type="button"
@@ -170,7 +228,10 @@ export const ResolutionSection: React.FC<ResolutionSectionProps> = ({
         >
           <div className="flex items-center gap-2">
             <BrainCircuit className="w-3.5 h-3.5 text-accent" />
-            <span>Raciocínio Detalhado Passo a Passo (Raio-X)</span>
+            <span>Destrinchando</span>
+            {isGenerating && !cotContent && (
+              <Loader2 className="w-3 h-3 animate-spin text-accent ml-1" />
+            )}
           </div>
           {showCoT ? <ChevronUp className="w-4 h-4 text-muted" /> : <ChevronDown className="w-4 h-4 text-muted" />}
         </button>
@@ -178,13 +239,18 @@ export const ResolutionSection: React.FC<ResolutionSectionProps> = ({
         {showCoT && (
           <div
             data-question-selectable="true"
-            className="p-4 bg-surface border-t border-border text-xs text-secondary theme-text-secondary leading-relaxed font-mono whitespace-pre-line space-y-2"
+            className="p-4 bg-surface border-t border-border text-sm text-primary theme-text-primary leading-relaxed whitespace-pre-line space-y-2"
           >
             {cotContent ? (
               cotContent
+            ) : isGenerating ? (
+              <span className="inline-flex items-center gap-2 text-xs text-muted theme-text-muted italic">
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-accent" />
+                <span>Destrinchando os conceitos e o raciocínio desta questão...</span>
+              </span>
             ) : (
-              <span className="text-muted theme-text-muted italic font-sans">
-                Nenhum passo a passo detalhado registrado para esta questão além do comentário pedagógico acima.
+              <span className="text-xs text-muted theme-text-muted italic">
+                Configure sua chave de IA para gerar automaticamente o destrinchamento conceitual desta questão.
               </span>
             )}
           </div>

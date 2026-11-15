@@ -159,6 +159,18 @@ export function useStudyData({ currentMode }: UseStudyDataOptions) {
     void bootstrapDefaultBanks();
   }, [bootstrapDefaultBanks]);
 
+  // Atualiza automaticamente o estado em memória quando uma resolução/Destrinchando for gerada e salva em segundo plano
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleResolutionUpdated = () => {
+      setDatabases(LocalStorageManager.getDatabases(initialQuestionBank.question_bank));
+    };
+    window.addEventListener('silenon:question-resolution-updated', handleResolutionUpdated);
+    return () => {
+      window.removeEventListener('silenon:question-resolution-updated', handleResolutionUpdated);
+    };
+  }, []);
+
   // 3. High-performance Search Engine Instance
   const searchEngine = useMemo(() => {
     return new FastSearchEngine(questions);

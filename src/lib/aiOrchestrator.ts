@@ -1,4 +1,5 @@
 import { Question, UserAnswerRecord, UserStatistics } from '../types/question';
+import { LocalStorageManager } from './storage';
 
 export const AI_KEYS_STORAGE_KEY = 'memoriz_ai_keys_v1';
 export const AI_ACCUMULATED_TOKENS_KEY = 'memoriz_ai_accumulated_tokens_v1';
@@ -2262,6 +2263,11 @@ ANCORAGEM ESTRITA EM EVIDÊNCIAS E ANTI-ALUCINAÇÃO:
 - É TERMINANTEMENTE PROIBIDO inventar erros conceituais prévios, extrapolar números que não constam no enunciado ou supor elementos visuais que não estejam descritos no contexto.
 - Se faltar qualquer dado essencial ou se o raciocínio do estudante for vago/incompleto, declare expressamente essa ausência ("Você não mencionou...", "O enunciado não fornece...") antes de dar qualquer orientação pedagógica.
 
+SELEÇÃO DE TRECHOS E FRAGMENTOS DA QUESTÃO:
+- O aplicativo permite que o estudante selecione com o dedo ou mouse qualquer trecho ou fragmento direto do enunciado ou das alternativas da questão e envie diretamente ao chat (geralmente no formato \`"trecho selecionado" —\` ou \`“trecho selecionado” —\`, podendo começar ou terminar no meio de uma frase).
+- Portanto, quando o usuário enviar um fragmento entre aspas com \`—\` (ou um recorte parcial de texto da questão), entenda que ele selecionou aquele trecho específico da questão para tirar dúvida.
+- NUNCA diga que a mensagem "cortou no meio", "ficou incompleta" ou que o usuário "não terminou de digitar". Contextualize aquele trecho dentro da questão ativa, explique o conceito envolvido de forma clara e ajude o estudante a chegar ao raciocínio certo.
+
 Responda EXCLUSIVAMENTE em formato JSON válido seguindo exatamente esta estrutura:
 {
   "internal_reasoning": "Diagnóstico técnico conciso: quais conceitos o aluno demonstrou dominar na fala dele e qual lacuna conceitual ou de interpretação travou a resolução.",
@@ -2373,7 +2379,7 @@ Responda EXCLUSIVAMENTE em formato JSON válido seguindo exatamente esta estrutu
   };
 }
 
-export const LEARNING_IMPROVEMENT_TOKEN_GOAL = 800;
+export const LEARNING_IMPROVEMENT_TOKEN_GOAL = 2000;
 export const MAX_REQUEST_TOKEN_BUDGET = 90000;
 export const MAX_REQUEST_CHAR_BUDGET = 320000;
 const LAST_DIAGNOSIS_STORAGE_KEY = 'memoriz_ai_last_diagnosis_v1';
@@ -2728,6 +2734,10 @@ DIRETRIZES OBRIGATÓRIAS DO STRIVE:
    - O sistema converterá esse marcador automaticamente em um botão interativo com o gráfico vetorial validado. NUNCA escreva tags \`<svg>\` cruas na mensagem; use exclusivamente o marcador \`[[GRAFICO: "Título curto" | "Descrição detalhada"]]\`.
 10. CUIDADO HUMANO COM HORÁRIO DE MADRUGADA (\`00:30\` ÀS \`05:00\`):
    - Usando o horário em \`[Horário da mensagem: ...]\` da mensagem atual, se o horário atual estiver entre **\`00:30\` e \`05:00\`** da madrugada e você **ainda não tiver comentado sobre o horário nesta conversa**, dê **apenas uma única vez** um conselho breve e acolhedor recomendando descansar após tirar aquela dúvida, sem insistir nem repetir nas mensagens seguintes.
+11. SELEÇÃO DE TRECHOS E FRAGMENTOS DA QUESTÃO (\`"trecho selecionado" —\` / \`“trecho selecionado” —\`):
+   - O aplicativo permite que o estudante **selecione com o dedo/mouse qualquer trecho ou fragmento direto do enunciado ou das alternativas da questão** e clique em um botão para enviá-lo diretamente ao chat (geralmente no formato \`"trecho selecionado" —\` ou \`“trecho selecionado” —\`, podendo começar ou terminar no meio de uma frase).
+   - Portanto, quando o usuário enviar um fragmento entre aspas com \`—\` (ou um recorte parcial de texto da questão), **entenda que ele selecionou aquele trecho específico da questão para tirar dúvida**.
+   - **NUNCA** diga que a mensagem "cortou no meio", "ficou incompleta" ou que o usuário "não terminou de digitar". Contextualize aquele trecho dentro da questão ativa, explique o conceito envolvido de forma clara e ajude o estudante a chegar ao raciocínio certo.
 
 CONTEXTO INTERNO DE REFERÊNCIA (NÃO RECITE COMO RELATÓRIO TÉCNICO):
 Resumo geral: ${statsSummary}
@@ -3700,6 +3710,270 @@ REGRAS OBRIGATÓRIAS:
   }
 
   return [];
+}
+
+export function isGenericResolutionText(text?: string | null): boolean {
+  if (!text) return true;
+  const trimmed = String(text).trim();
+  if (!trimmed) return true;
+  if (trimmed === 'Resolução fundamentada da questão.') return true;
+  if (trimmed === 'Alternativa correta de acordo com a resolução e o gabarito oficial.') return true;
+  if (trimmed === 'Alternativa incorreta. Não atende aos requisitos solicitados no enunciado.') return true;
+  if (/^Questão\s+\d+\s+do\s+Caderno/i.test(trimmed)) return true;
+  if (
+    trimmed.length < 220 &&
+    (/Alternativa correta:\s*[A-E]\.?$/i.test(trimmed) ||
+      /Gabarito oficial(\s+do\s+INEP)?:\s*Alternativa\s*[A-E]\.?$/i.test(trimmed))
+  ) {
+    return true;
+  }
+  return false;
+}
+
+export function needsAutoResolutionGeneration(question?: Question | null): boolean {
+  if (!question || !question.resolution) return false;
+  const hasRealCot = !isGenericResolutionText(question.resolution.cot_reasoning);
+  const hasRealPedagogical = !isGenericResolutionText(question.resolution.pedagogical_explanation);
+  const hasRealOptionComments =
+    Array.isArray(question.options) &&
+    question.options.length > 0 &&
+    question.options.every((opt) => !isGenericResolutionText(opt.why_wrong_or_right));
+
+  return !hasRealCot || !hasRealPedagogical || !hasRealOptionComments;
+}
+
+function stripAccidentalAnswerSpoilers(text: string): string {
+  if (!text) return '';
+  return text
+    .replace(
+      /(?:portanto|assim|logo|dessa forma|conclui-se que|por isso)[,\s]+(?:a\s+)?(?:alternativa|opção|resposta|letra)\s+(?:correta|certa)?\s*(?:é\s*(?:a\s*)?)?(?:letra\s+)?[A-E]\b[^.\n]*\.?/gi,
+      ''
+    )
+    .replace(/\b(?:alternativa|letra|gabarito)\s+[A-E]\b/gi, 'opção correspondente')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+const inFlightAutoResolutions = new Map<
+  string,
+  Promise<{
+    cot_reasoning: string;
+    pedagogical_explanation: string;
+    optionComments: Record<string, string>;
+  } | null>
+>();
+
+/**
+ * Gera silenciosamente em segundo plano o "Destrinchando" (explicação conceitual da pergunta sem spoiler de gabarito)
+ * e os Comentários Pedagógicos curtos de cada alternativa, salvando diretamente na questão do banco ativo no LocalStorageManager.
+ */
+export async function autoGenerateAndPersistQuestionResolution(
+  question: Question
+): Promise<{
+  cot_reasoning: string;
+  pedagogical_explanation: string;
+  optionComments: Record<string, string>;
+} | null> {
+  if (!question || !needsAutoResolutionGeneration(question)) {
+    return null;
+  }
+
+  const { groqApiKey, geminiApiKey } = getAIKeys();
+  const cleanGroqKey = (groqApiKey || '').trim();
+  const cleanGeminiKey = (geminiApiKey || '').trim();
+  if (!cleanGroqKey && !cleanGeminiKey) {
+    return null;
+  }
+
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return null;
+  }
+
+  const dedupKey = `${question.content_hash || question.sequence_id}`;
+  const existingPromise = inFlightAutoResolutions.get(dedupKey);
+  if (existingPromise) {
+    return existingPromise;
+  }
+
+  const taskPromise = (async () => {
+    try {
+      const deducedAnswer = String(question.resolution?.deduced_answer || 'A')
+        .trim()
+        .toUpperCase();
+      const optionsBlock = (question.options || [])
+        .map((o) => `${o.letter}) ${o.text || '[Alternativa visual/imagem]'}`)
+        .join('\n');
+
+      const supportContext =
+        question.associated_context?.has_associated_context &&
+        question.associated_context?.content?.trim()
+          ? `Texto de Apoio:\n${question.associated_context.content.trim().slice(0, 1200)}\n\n`
+          : '';
+
+      const systemPrompt = `Você é um professor especialista no ENEM. Gere dois conteúdos distintos em JSON para a questão fornecida:
+
+1. "destrinchando":
+   - Explicação conceitual da PERGUNTA EM SI (2 a 3 parágrafos claros e diretos).
+   - Ensine o conteúdo, os porquês e o raciocínio que o enunciado cobra.
+   - REGRA INVIOLÁVEL (ZERO SPOILER): É ESTRITAMENTE PROIBIDO revelar, citar ou entregar qual é a letra da alternativa correta (NUNCA escreva "Alternativa A/B/C/D/E", "letra C", "portanto a correta é..." ou equivalente). Foque 100% em ensinar o conceito e o fenômeno/cálculo que a questão exige.
+
+2. "option_comments":
+   - Objeto com uma chave para cada alternativa ("A", "B", "C", "D", "E").
+   - Cada valor deve ser um Comentário Pedagógico CURTO E DIRETO (1 frase objetiva, ~12 a 28 palavras) dizendo diretamente por que aquela alternativa está certa ou por que está errada.
+
+Retorne EXCLUSIVAMENTE um JSON válido neste formato exato:
+{
+  "destrinchando": "Explicação conceitual da pergunta em si, sem revelar nem citar nenhuma letra de alternativa...",
+  "option_comments": {
+    "A": "Comentário curto e direto dizendo objetivamente por que A está certa ou errada.",
+    "B": "Comentário curto e direto dizendo objetivamente por que B está certa ou errada.",
+    "C": "Comentário curto e direto dizendo objetivamente por que C está certa ou errada.",
+    "D": "Comentário curto e direto dizendo objetivamente por que D está certa ou errada.",
+    "E": "Comentário curto e direto dizendo objetivamente por que E está certa ou errada."
+  }
+}`;
+
+      const userPrompt = [
+        `Disciplina: ${question.metadata?.subject || 'Geral'}`,
+        question.metadata?.topics?.length
+          ? `Tópicos: ${question.metadata.topics.join(', ')}`
+          : '',
+        question.metadata?.habilidade_inep
+          ? `Habilidade INEP: ${question.metadata.habilidade_inep}`
+          : '',
+        `${supportContext}Enunciado:\n${question.stem?.full_text || ''}`,
+        `Alternativas:\n${optionsBlock}`,
+        `Gabarito Oficial (APENAS PARA OS COMENTÁRIOS DAS ALTERNATIVAS — NUNCA REVELE NO CAMPO "destrinchando"): Alternativa ${deducedAnswer}`,
+      ]
+        .filter(Boolean)
+        .join('\n\n');
+
+      const messages: AIMessage[] = [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ];
+
+      let rawResponseText = '';
+
+      if (cleanGroqKey) {
+        const groqChain = [GROQ_PRIMARY_MODEL, ...GROQ_FALLBACK_MODELS];
+        for (const model of groqChain) {
+          try {
+            const res = await callGroqModel(model, messages, cleanGroqKey, true, 0.3);
+            if (res.text && res.text.trim()) {
+              rawResponseText = res.text;
+              break;
+            }
+          } catch {
+            // Tenta próximo modelo da cadeia silenciosamente
+          }
+        }
+      }
+
+      if (!rawResponseText && cleanGeminiKey) {
+        try {
+          const gemRes = await callGeminiModel(
+            DEFAULT_GEMINI_MODEL,
+            messages,
+            cleanGeminiKey,
+            true,
+            undefined,
+            AI_REQUEST_TIMEOUT_MS
+          );
+          rawResponseText = gemRes.text;
+        } catch {
+          // Ignora falha silenciosa
+        }
+      }
+
+      if (!rawResponseText) {
+        return null;
+      }
+
+      const parsed = extractSafeJson(rawResponseText);
+      if (!parsed || typeof parsed !== 'object') {
+        return null;
+      }
+
+      const rawDestrinchando =
+        typeof parsed.destrinchando === 'string' ? parsed.destrinchando.trim() : '';
+      const cleanDestrinchando = stripAccidentalAnswerSpoilers(rawDestrinchando);
+      if (!cleanDestrinchando || cleanDestrinchando.length < 30) {
+        return null;
+      }
+
+      const rawOptionComments =
+        parsed.option_comments && typeof parsed.option_comments === 'object'
+          ? parsed.option_comments
+          : {};
+
+      const optionComments: Record<string, string> = {};
+      for (const opt of question.options || []) {
+        const letter = String(opt.letter || '').trim().toUpperCase();
+        if (!letter) continue;
+        const comment = String(
+          rawOptionComments[letter] ?? rawOptionComments[letter.toLowerCase()] ?? ''
+        )
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (comment) {
+          optionComments[letter] = comment;
+        }
+      }
+
+      const correctOptComment = optionComments[deducedAnswer] || '';
+      const formattedPedagogicalLines: string[] = [];
+      for (const opt of question.options || []) {
+        const letter = String(opt.letter || '').trim().toUpperCase();
+        const comment = optionComments[letter];
+        if (comment) {
+          formattedPedagogicalLines.push(`${letter}) ${comment}`);
+        }
+      }
+
+      const pedagogical_explanation =
+        formattedPedagogicalLines.length > 0
+          ? formattedPedagogicalLines.join('\n')
+          : correctOptComment || cleanDestrinchando;
+
+      LocalStorageManager.updateQuestionResolution(
+        question.sequence_id,
+        question.content_hash,
+        {
+          cot_reasoning: cleanDestrinchando,
+          pedagogical_explanation,
+          optionComments,
+        }
+      );
+
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('silenon:question-resolution-updated', {
+            detail: {
+              questionId: question.sequence_id,
+              contentHash: question.content_hash,
+              cot_reasoning: cleanDestrinchando,
+              pedagogical_explanation,
+              optionComments,
+            },
+          })
+        );
+      }
+
+      return {
+        cot_reasoning: cleanDestrinchando,
+        pedagogical_explanation,
+        optionComments,
+      };
+    } catch {
+      return null;
+    } finally {
+      inFlightAutoResolutions.delete(dedupKey);
+    }
+  })();
+
+  inFlightAutoResolutions.set(dedupKey, taskPromise);
+  return taskPromise;
 }
 
 

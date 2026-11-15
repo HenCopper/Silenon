@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { motion, AnimatePresence, useDragControls } from 'motion/react';
 import {
   X,
@@ -160,6 +160,12 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
   const chatScrollContainerRef = useRef<HTMLDivElement | null>(null);
   const skipNextAutoScrollRef = useRef<boolean>(false);
   const recognitionRef = useRef<any>(null);
+  const shouldKeepListeningRef = useRef<boolean>(false);
+  const confirmedTextRef = useRef<string>('');
+  const sessionBaseConfirmedRef = useRef<string>('');
+  const sessionLatestTranscriptRef = useRef<string>('');
+  const lastFinalIndexRef = useRef<number>(-1);
+  const voiceRestartTimerRef = useRef<number | null>(null);
   const liquidPopoverRef = useRef<HTMLDivElement | null>(null);
   const liquidPopoverMenuRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -172,12 +178,41 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
   const speakingAbortIdRef = useRef<string | null>(null);
   const dragControls = useDragControls();
 
+  const stopVoiceListening = useCallback(() => {
+    shouldKeepListeningRef.current = false;
+    if (voiceRestartTimerRef.current !== null && typeof window !== 'undefined') {
+      window.clearTimeout(voiceRestartTimerRef.current);
+      voiceRestartTimerRef.current = null;
+    }
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.onend = null;
+        recognitionRef.current.onerror = null;
+        recognitionRef.current.onresult = null;
+        recognitionRef.current.stop();
+      } catch {
+        // Ignore
+      }
+      recognitionRef.current = null;
+    }
+    setIsListeningVoice(false);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      stopVoiceListening();
+    };
+  }, [stopVoiceListening]);
+
   // Pre-fill input when user clicks "Perguntar ao Strive" on a text selection
   useEffect(() => {
     if (!pendingQuote || !pendingQuote.text) return;
     setActiveTab('chat');
     const cleanQuote = pendingQuote.text.replace(/\s+/g, ' ').trim();
     const formattedQuote = `“${cleanQuote}” — `;
+    confirmedTextRef.current = formattedQuote;
+    sessionBaseConfirmedRef.current = formattedQuote;
+    sessionLatestTranscriptRef.current = '';
     setInputText(formattedQuote);
     onConsumePendingQuote?.();
     const timer = window.setTimeout(() => {
@@ -247,14 +282,7 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
   // Refresh token count, quota & unanalyzed question threads whenever popover opens
   useEffect(() => {
     if (!isOpen) {
-      if (recognitionRef.current) {
-        try {
-          recognitionRef.current.stop();
-        } catch {
-          // Ignore
-        }
-      }
-      setIsListeningVoice(false);
+      stopVoiceListening();
       setIsLiquidPopoverOpen(false);
       setEditingMessageId(null);
       setEditingMessageText('');
@@ -816,13 +844,8 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
     const targetIdx = chatMessages.findIndex((m) => m.id === msgId && m.role === 'user');
     if (targetIdx === -1) return;
 
-    if (isListeningVoice && recognitionRef.current) {
-      try {
-        recognitionRef.current.stop();
-      } catch {
-        // Ignore
-      }
-      setIsListeningVoice(false);
+    if (isListeningVoice || shouldKeepListeningRef.current) {
+      stopVoiceListening();
     }
 
     if (speakingMessageId) {
@@ -935,13 +958,8 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
     const attachmentsSnapshot = customMessage ? [] : [...pendingAttachments];
     if ((!rawMessage && attachmentsSnapshot.length === 0) || isSendingChat) return;
 
-    if (isListeningVoice && recognitionRef.current) {
-      try {
-        recognitionRef.current.stop();
-      } catch {
-        // Ignore
-      }
-      setIsListeningVoice(false);
+    if (isListeningVoice || shouldKeepListeningRef.current) {
+      stopVoiceListening();
     }
 
     const attachmentMetaSuffix =
@@ -962,6 +980,9 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
 
     const updatedHistory = [...chatMessages, userMsg];
     setChatMessages(updatedHistory);
+    confirmedTextRef.current = '';
+    sessionBaseConfirmedRef.current = '';
+    sessionLatestTranscriptRef.current = '';
     setInputText('');
     if (!customMessage) {
       setPendingAttachments([]);
@@ -1055,17 +1076,135 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
     }
   };
 
-  // Voice Dictation in Global Chat with explicit getUserMedia permission & non-silent error reporting
-  const handleToggleVoiceInput = async () => {
-    if (isListeningVoice) {
-      if (recognitionRef.current) {
-        try {
-          recognitionRef.current.stop();
-        } catch {
-          // Ignore
+  const normalizeForSpeechDedup = (text: string): string =>
+    text.replace(/\s+/g, ' ').trim().toLowerCase();
+
+  const joinCleanSpeech = (baseText: string, newSegment: string): string => {
+    const cleanBase = baseText.replace(/\s+/g, ' ').trim();
+    const cleanNew = newSegment.replace(/\s+/g, ' ').trim();
+
+    if (!cleanNew) return cleanBase;
+    if (!cleanBase) return cleanNew;
+
+    const normBase = normalizeForSpeechDedup(cleanBase);
+    const normNew = normalizeForSpeechDedup(cleanNew);
+
+    if (!normNew) return cleanBase;
+    if (normBase === normNew) return cleanBase;
+
+    // Se o novo trecho já começar com o texto anterior acumulado, substitui em vez de concatenar
+    if (normNew.startsWith(normBase)) {
+      return cleanNew;
+    }
+
+    // Se o texto confirmado já terminar exatamente com o novo trecho, ignora a repetição
+    if (normBase.endsWith(normNew)) {
+      return cleanBase;
+    }
+
+    // Verifica sobreposição de sufixo/prefixo entre palavras
+    const baseWords = cleanBase.split(' ');
+    const newWords = cleanNew.split(' ');
+    const maxOverlap = Math.min(baseWords.length, newWords.length);
+    for (let k = maxOverlap; k >= 1; k--) {
+      const baseSuffix = baseWords.slice(baseWords.length - k).join(' ').toLowerCase();
+      const newPrefix = newWords.slice(0, k).join(' ').toLowerCase();
+      if (baseSuffix === newPrefix && (k > 1 || baseSuffix.length >= 4)) {
+        const remainingNew = newWords.slice(k).join(' ');
+        return remainingNew ? `${cleanBase} ${remainingNew}` : cleanBase;
+      }
+    }
+
+    return `${cleanBase} ${cleanNew}`;
+  };
+
+  const extractCleanTranscript = (
+    event: any,
+    isContinuous: boolean
+  ): { finalTranscript: string; interimTranscript: string; fullSessionTranscript: string } => {
+    const results = event?.results;
+    if (!results || typeof results.length !== 'number') {
+      return { finalTranscript: '', interimTranscript: '', fullSessionTranscript: '' };
+    }
+
+    if (!isContinuous) {
+      let finalAccum = '';
+      let interimAccum = '';
+
+      for (let i = 0; i < results.length; i++) {
+        const res = results[i];
+        const piece = String(res?.[0]?.transcript || '').replace(/\s+/g, ' ').trim();
+        if (!piece) continue;
+
+        if (i + 1 < results.length) {
+          const nextPiece = String(results[i + 1]?.[0]?.transcript || '')
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (
+            nextPiece &&
+            normalizeForSpeechDedup(nextPiece).startsWith(normalizeForSpeechDedup(piece))
+          ) {
+            continue;
+          }
+        }
+
+        if (res.isFinal) {
+          finalAccum = joinCleanSpeech(finalAccum, piece);
+        } else {
+          interimAccum = joinCleanSpeech(interimAccum, piece);
         }
       }
-      setIsListeningVoice(false);
+
+      const fullSessionTranscript = joinCleanSpeech(finalAccum, interimAccum);
+      let cleanInterim = interimAccum;
+      if (finalAccum && cleanInterim) {
+        const normFinal = normalizeForSpeechDedup(finalAccum);
+        const normInterim = normalizeForSpeechDedup(cleanInterim);
+        if (normInterim === normFinal || normFinal.endsWith(normInterim)) {
+          cleanInterim = '';
+        } else if (normInterim.startsWith(normFinal)) {
+          cleanInterim = cleanInterim.slice(finalAccum.length).trim();
+        }
+      }
+
+      return {
+        finalTranscript: finalAccum,
+        interimTranscript: cleanInterim,
+        fullSessionTranscript,
+      };
+    }
+
+    let newFinalChunk = '';
+    let currentInterim = '';
+    const startIdx = typeof event.resultIndex === 'number' ? event.resultIndex : 0;
+
+    for (let i = startIdx; i < results.length; i++) {
+      const res = results[i];
+      const piece = String(res?.[0]?.transcript || '').replace(/\s+/g, ' ').trim();
+      if (!piece) continue;
+
+      if (res.isFinal) {
+        if (i <= lastFinalIndexRef.current) {
+          continue;
+        }
+        lastFinalIndexRef.current = i;
+        newFinalChunk = joinCleanSpeech(newFinalChunk, piece);
+      } else {
+        currentInterim = joinCleanSpeech(currentInterim, piece);
+      }
+    }
+
+    return {
+      finalTranscript: newFinalChunk,
+      interimTranscript: currentInterim,
+      fullSessionTranscript: joinCleanSpeech(newFinalChunk, currentInterim),
+    };
+  };
+
+  // Voice Dictation in Global Chat with persistent listening & Android deduplication
+  const handleToggleVoiceInput = async () => {
+    if (isListeningVoice || shouldKeepListeningRef.current) {
+      stopVoiceListening();
       return;
     }
 
@@ -1084,8 +1223,11 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
       return;
     }
 
-    // Request explicit microphone permission first so browser blocks are caught immediately
-    if (typeof navigator !== 'undefined' && navigator.mediaDevices?.getUserMedia) {
+    const isAndroid =
+      typeof navigator !== 'undefined' && /Android/i.test(navigator.userAgent);
+
+    // Request explicit microphone permission first on non-Android so browser blocks are caught immediately
+    if (!isAndroid && typeof navigator !== 'undefined' && navigator.mediaDevices?.getUserMedia) {
       try {
         const mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
         mediaStream.getTracks().forEach((track) => track.stop());
@@ -1105,71 +1247,126 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
           `[Mic getUserMedia Error] ${permErr?.name || 'Error'}: ${permErr?.message || String(permErr)}`,
           permErr?.stack
         );
-        setIsListeningVoice(false);
+        stopVoiceListening();
         return;
       }
     }
 
-    try {
-      const recognition = new SpeechRecognitionAPI();
-      recognition.lang = 'pt-BR';
-      recognition.continuous = true;
-      recognition.interimResults = true;
+    confirmedTextRef.current = inputText.trim();
+    shouldKeepListeningRef.current = true;
+    setIsListeningVoice(true);
 
-      const baseText = inputText;
-      recognition.onresult = (event: any) => {
-        let transcript = '';
-        for (let i = 0; i < event.results.length; i++) {
-          transcript += event.results[i][0]?.transcript || '';
-        }
-        setInputText((baseText ? `${baseText} ${transcript}` : transcript).trim());
-      };
+    const startRecognitionInstance = () => {
+      if (!shouldKeepListeningRef.current) return;
 
-      recognition.onerror = (event: any) => {
-        const errCode = String(event?.error || 'unknown').toLowerCase();
-        setIsListeningVoice(false);
+      try {
+        const recognition = new SpeechRecognitionAPI();
+        recognition.lang = 'pt-BR';
+        recognition.continuous = !isAndroid;
+        recognition.interimResults = true;
+        recognition.maxAlternatives = 1;
 
-        if (errCode === 'aborted') {
-          return;
-        }
+        lastFinalIndexRef.current = -1;
+        sessionBaseConfirmedRef.current = confirmedTextRef.current;
+        sessionLatestTranscriptRef.current = '';
 
-        let errMessage = `Erro no microfone (${errCode}) — verifique a permissão ou digite sua mensagem`;
-        if (errCode === 'not-allowed' || errCode === 'service-not-allowed') {
-          errMessage =
-            'Permissão do microfone negada ou bloqueada pelo navegador. Libere o acesso ou digite sua mensagem.';
-        } else if (errCode === 'no-speech') {
-          errMessage =
-            'Nenhuma fala detectada pelo microfone — verifique a entrada de áudio ou digite sua mensagem';
-        } else if (errCode === 'audio-capture') {
-          errMessage =
-            'Dispositivo de microfone indisponível ou ocupado por outro programa';
-        } else if (errCode === 'network') {
-          errMessage =
-            'Falha de rede no serviço de reconhecimento de voz do navegador — digite sua mensagem';
-        }
+        recognition.onresult = (event: any) => {
+          if (!shouldKeepListeningRef.current) return;
 
-        setErrorBanner(errMessage);
+          const { finalTranscript, interimTranscript, fullSessionTranscript } =
+            extractCleanTranscript(event, !isAndroid);
+
+          if (isAndroid) {
+            sessionLatestTranscriptRef.current = fullSessionTranscript;
+            if (finalTranscript) {
+              confirmedTextRef.current = joinCleanSpeech(
+                sessionBaseConfirmedRef.current,
+                finalTranscript
+              );
+            }
+            setInputText(joinCleanSpeech(confirmedTextRef.current, interimTranscript));
+          } else {
+            if (finalTranscript) {
+              confirmedTextRef.current = joinCleanSpeech(
+                confirmedTextRef.current,
+                finalTranscript
+              );
+            }
+            setInputText(joinCleanSpeech(confirmedTextRef.current, interimTranscript));
+          }
+        };
+
+        recognition.onerror = (event: any) => {
+          const errCode = String(event?.error || 'unknown').toLowerCase();
+
+          if (
+            shouldKeepListeningRef.current &&
+            (errCode === 'no-speech' || errCode === 'aborted')
+          ) {
+            return;
+          }
+
+          if (
+            errCode === 'not-allowed' ||
+            errCode === 'service-not-allowed' ||
+            errCode === 'audio-capture'
+          ) {
+            stopVoiceListening();
+            const errMessage =
+              errCode === 'audio-capture'
+                ? 'Dispositivo de microfone indisponível ou ocupado por outro programa'
+                : 'Permissão do microfone negada ou bloqueada pelo navegador. Libere o acesso ou digite sua mensagem.';
+            setErrorBanner(errMessage);
+            recordOrchestratorRuntimeError(
+              `[SpeechRecognition.onerror] error=${errCode} message=${event?.message || errMessage}`
+            );
+            return;
+          }
+
+          if (!shouldKeepListeningRef.current) {
+            stopVoiceListening();
+          }
+        };
+
+        recognition.onend = () => {
+          if (isAndroid && sessionLatestTranscriptRef.current) {
+            confirmedTextRef.current = joinCleanSpeech(
+              sessionBaseConfirmedRef.current,
+              sessionLatestTranscriptRef.current
+            );
+            sessionLatestTranscriptRef.current = '';
+            setInputText(confirmedTextRef.current);
+          }
+
+          if (shouldKeepListeningRef.current) {
+            if (voiceRestartTimerRef.current !== null && typeof window !== 'undefined') {
+              window.clearTimeout(voiceRestartTimerRef.current);
+            }
+            voiceRestartTimerRef.current = window.setTimeout(() => {
+              voiceRestartTimerRef.current = null;
+              if (shouldKeepListeningRef.current) {
+                startRecognitionInstance();
+              }
+            }, 120);
+          } else {
+            setIsListeningVoice(false);
+          }
+        };
+
+        recognitionRef.current = recognition;
+        recognition.start();
+      } catch (startErr: any) {
+        stopVoiceListening();
+        const startMsg = `Não foi possível iniciar o reconhecimento de voz (${startErr?.message || 'Permissão do microfone negada ou bloqueada pelo navegador. Libere o acesso ou digite sua mensagem.'})`;
+        setErrorBanner(startMsg);
         recordOrchestratorRuntimeError(
-          `[SpeechRecognition.onerror] error=${errCode} message=${event?.message || errMessage}`
+          `[SpeechRecognition.start Exception] ${startErr?.message || String(startErr)}`,
+          startErr?.stack
         );
-      };
+      }
+    };
 
-      recognition.onend = () => {
-        setIsListeningVoice(false);
-      };
-
-      recognitionRef.current = recognition;
-      setIsListeningVoice(true);
-      recognition.start();
-    } catch (startErr: any) {
-      setIsListeningVoice(false);
-      const startMsg = `Não foi possível iniciar o reconhecimento de voz (${startErr?.message || 'Permissão do microfone negada ou bloqueada pelo navegador. Libere o acesso ou digite sua mensagem.'})`;
-      setErrorBanner(startMsg);
-      recordOrchestratorRuntimeError(
-        `[SpeechRecognition.start Exception] ${startErr?.message || String(startErr)}`,
-        startErr?.stack
-      );
-    }
+    startRecognitionInstance();
   };
 
   const stopActiveSpeechPlayback = () => {
@@ -1942,7 +2139,13 @@ export const GlobalAssistantPopover: React.FC<GlobalAssistantPopoverProps> = ({
                           ref={chatInputRef}
                           rows={1}
                           value={inputText}
-                          onChange={(e) => setInputText(e.target.value)}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setInputText(val);
+                            confirmedTextRef.current = val;
+                            sessionBaseConfirmedRef.current = val;
+                            sessionLatestTranscriptRef.current = '';
+                          }}
                           onPaste={handlePasteAttachment}
                           onKeyDown={(e) => {
                             if (e.key === 'Enter' && !e.shiftKey) {

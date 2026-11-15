@@ -50,6 +50,130 @@ function base64AudioToBlobUrl(base64: string, mimeType: string): string {
   return URL.createObjectURL(blob);
 }
 
+function normalizeForSpeechDedup(text: string): string {
+  return text.replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function joinCleanSpeech(baseText: string, newSegment: string): string {
+  const cleanBase = baseText.replace(/\s+/g, ' ').trim();
+  const cleanNew = newSegment.replace(/\s+/g, ' ').trim();
+
+  if (!cleanNew) return cleanBase;
+  if (!cleanBase) return cleanNew;
+
+  const normBase = normalizeForSpeechDedup(cleanBase);
+  const normNew = normalizeForSpeechDedup(cleanNew);
+
+  if (!normNew) return cleanBase;
+  if (normBase === normNew) return cleanBase;
+
+  if (normNew.startsWith(normBase)) {
+    return cleanNew;
+  }
+
+  if (normBase.endsWith(normNew)) {
+    return cleanBase;
+  }
+
+  const baseWords = cleanBase.split(' ');
+  const newWords = cleanNew.split(' ');
+  const maxOverlap = Math.min(baseWords.length, newWords.length);
+  for (let k = maxOverlap; k >= 1; k--) {
+    const baseSuffix = baseWords.slice(baseWords.length - k).join(' ').toLowerCase();
+    const newPrefix = newWords.slice(0, k).join(' ').toLowerCase();
+    if (baseSuffix === newPrefix && (k > 1 || baseSuffix.length >= 4)) {
+      const remainingNew = newWords.slice(k).join(' ');
+      return remainingNew ? `${cleanBase} ${remainingNew}` : cleanBase;
+    }
+  }
+
+  return `${cleanBase} ${cleanNew}`;
+}
+
+function extractCleanTranscript(
+  event: any,
+  isContinuous: boolean,
+  lastFinalIndexRef: { current: number }
+): { finalTranscript: string; interimTranscript: string; fullSessionTranscript: string } {
+  const results = event?.results;
+  if (!results || typeof results.length !== 'number') {
+    return { finalTranscript: '', interimTranscript: '', fullSessionTranscript: '' };
+  }
+
+  if (!isContinuous) {
+    let finalAccum = '';
+    let interimAccum = '';
+
+    for (let i = 0; i < results.length; i++) {
+      const res = results[i];
+      const piece = String(res?.[0]?.transcript || '').replace(/\s+/g, ' ').trim();
+      if (!piece) continue;
+
+      if (i + 1 < results.length) {
+        const nextPiece = String(results[i + 1]?.[0]?.transcript || '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (
+          nextPiece &&
+          normalizeForSpeechDedup(nextPiece).startsWith(normalizeForSpeechDedup(piece))
+        ) {
+          continue;
+        }
+      }
+
+      if (res.isFinal) {
+        finalAccum = joinCleanSpeech(finalAccum, piece);
+      } else {
+        interimAccum = joinCleanSpeech(interimAccum, piece);
+      }
+    }
+
+    const fullSessionTranscript = joinCleanSpeech(finalAccum, interimAccum);
+    let cleanInterim = interimAccum;
+    if (finalAccum && cleanInterim) {
+      const normFinal = normalizeForSpeechDedup(finalAccum);
+      const normInterim = normalizeForSpeechDedup(cleanInterim);
+      if (normInterim === normFinal || normFinal.endsWith(normInterim)) {
+        cleanInterim = '';
+      } else if (normInterim.startsWith(normFinal)) {
+        cleanInterim = cleanInterim.slice(finalAccum.length).trim();
+      }
+    }
+
+    return {
+      finalTranscript: finalAccum,
+      interimTranscript: cleanInterim,
+      fullSessionTranscript,
+    };
+  }
+
+  let newFinalChunk = '';
+  let currentInterim = '';
+  const startIdx = typeof event.resultIndex === 'number' ? event.resultIndex : 0;
+
+  for (let i = startIdx; i < results.length; i++) {
+    const res = results[i];
+    const piece = String(res?.[0]?.transcript || '').replace(/\s+/g, ' ').trim();
+    if (!piece) continue;
+
+    if (res.isFinal) {
+      if (i <= lastFinalIndexRef.current) {
+        continue;
+      }
+      lastFinalIndexRef.current = i;
+      newFinalChunk = joinCleanSpeech(newFinalChunk, piece);
+    } else {
+      currentInterim = joinCleanSpeech(currentInterim, piece);
+    }
+  }
+
+  return {
+    finalTranscript: newFinalChunk,
+    interimTranscript: currentInterim,
+    fullSessionTranscript: joinCleanSpeech(newFinalChunk, currentInterim),
+  };
+}
+
 interface QuestionVoiceBarProps {
   question: Question;
   onRequireAPIKey: () => void;
@@ -100,9 +224,13 @@ export const QuestionVoiceBar: React.FC<QuestionVoiceBarProps> = ({
 
   // Refs for continuous SpeechRecognition & Barge-in neural audio tracking
   const isRecordingRef = useRef<boolean>(false);
-  const shouldRestartSpeechRef = useRef<boolean>(false);
+  const shouldKeepListeningRef = useRef<boolean>(false);
   const recognitionRef = useRef<any>(null);
-  const finalizedTranscriptRef = useRef<string>('');
+  const confirmedTextRef = useRef<string>('');
+  const sessionBaseConfirmedRef = useRef<string>('');
+  const sessionLatestTranscriptRef = useRef<string>('');
+  const lastFinalIndexRef = useRef<number>(-1);
+  const restartTimerRef = useRef<number | null>(null);
 
   const fullSpokenTextRef = useRef<string>('');
   const spokenCharIndexRef = useRef<number>(0);
@@ -151,7 +279,11 @@ export const QuestionVoiceBar: React.FC<QuestionVoiceBarProps> = ({
 
   const stopRecordingInternal = useCallback(() => {
     isRecordingRef.current = false;
-    shouldRestartSpeechRef.current = false;
+    shouldKeepListeningRef.current = false;
+    if (restartTimerRef.current !== null && typeof window !== 'undefined') {
+      window.clearTimeout(restartTimerRef.current);
+      restartTimerRef.current = null;
+    }
     setIsRecording(false);
     setInterimTranscript('');
     if (recognitionRef.current) {
@@ -171,7 +303,9 @@ export const QuestionVoiceBar: React.FC<QuestionVoiceBarProps> = ({
     stopRecordingInternal();
     setDraftTranscript('');
     setInterimTranscript('');
-    finalizedTranscriptRef.current = '';
+    confirmedTextRef.current = '';
+    sessionBaseConfirmedRef.current = '';
+    sessionLatestTranscriptRef.current = '';
     setErrorBanner(null);
   }, [stopRecordingInternal]);
 
@@ -183,7 +317,9 @@ export const QuestionVoiceBar: React.FC<QuestionVoiceBarProps> = ({
     setDraftTranscript('');
     setInterimTranscript('');
     setPendingStudentText(null);
-    finalizedTranscriptRef.current = '';
+    confirmedTextRef.current = '';
+    sessionBaseConfirmedRef.current = '';
+    sessionLatestTranscriptRef.current = '';
     setErrorBanner(null);
     setIsHistoryExpanded(false);
     setUnavailableAudioIds({});
@@ -380,7 +516,7 @@ export const QuestionVoiceBar: React.FC<QuestionVoiceBarProps> = ({
     return fullText.slice(0, charLimit).trim();
   };
 
-  // Start continuous microphone recording with separate shouldRestartSpeechRef to prevent permission error loops
+  // Start microphone recording with shouldKeepListeningRef and Android deduplication
   const startMicrophoneSession = useCallback(() => {
     setErrorBanner(null);
     setIsHistoryExpanded(true);
@@ -392,7 +528,7 @@ export const QuestionVoiceBar: React.FC<QuestionVoiceBarProps> = ({
 
     if (!SpeechRecognitionAPI) {
       isRecordingRef.current = false;
-      shouldRestartSpeechRef.current = false;
+      shouldKeepListeningRef.current = false;
       setIsRecording(false);
       setInterimTranscript('');
       setErrorBanner(
@@ -401,43 +537,60 @@ export const QuestionVoiceBar: React.FC<QuestionVoiceBarProps> = ({
       return;
     }
 
+    const isAndroid =
+      typeof navigator !== 'undefined' && /Android/i.test(navigator.userAgent);
+
     isRecordingRef.current = true;
-    shouldRestartSpeechRef.current = true;
+    shouldKeepListeningRef.current = true;
     setIsRecording(true);
 
     const createAndStartInstance = () => {
-      if (!isRecordingRef.current || !shouldRestartSpeechRef.current) return;
+      if (!isRecordingRef.current || !shouldKeepListeningRef.current) return;
       try {
         const recognition = new SpeechRecognitionAPI();
         recognition.lang = 'pt-BR';
-        recognition.continuous = true;
+        recognition.continuous = !isAndroid;
         recognition.interimResults = true;
         recognition.maxAlternatives = 1;
 
+        lastFinalIndexRef.current = -1;
+        sessionBaseConfirmedRef.current = confirmedTextRef.current;
+        sessionLatestTranscriptRef.current = '';
+
         recognition.onresult = (event: any) => {
-          let newFinalChunk = '';
-          let currentInterim = '';
+          if (!shouldKeepListeningRef.current) return;
 
-          for (let i = event.resultIndex; i < event.results.length; i++) {
-            const transcriptPiece = event.results[i][0]?.transcript || '';
-            if (event.results[i].isFinal) {
-              newFinalChunk += transcriptPiece + ' ';
-            } else {
-              currentInterim += transcriptPiece;
+          const { finalTranscript, interimTranscript, fullSessionTranscript } =
+            extractCleanTranscript(event, !isAndroid, lastFinalIndexRef);
+
+          if (isAndroid) {
+            sessionLatestTranscriptRef.current = fullSessionTranscript;
+            if (finalTranscript) {
+              confirmedTextRef.current = joinCleanSpeech(
+                sessionBaseConfirmedRef.current,
+                finalTranscript
+              );
+              setDraftTranscript(confirmedTextRef.current);
             }
+            setInterimTranscript(interimTranscript);
+          } else {
+            if (finalTranscript) {
+              confirmedTextRef.current = joinCleanSpeech(
+                confirmedTextRef.current,
+                finalTranscript
+              );
+              setDraftTranscript(confirmedTextRef.current);
+            }
+            setInterimTranscript(interimTranscript);
           }
-
-          if (newFinalChunk) {
-            const combined = (finalizedTranscriptRef.current + ' ' + newFinalChunk).replace(/\s+/g, ' ').trim();
-            finalizedTranscriptRef.current = combined;
-            setDraftTranscript(combined);
-          }
-          setInterimTranscript(currentInterim);
         };
 
         recognition.onerror = (event: any) => {
           const errCode = String(event?.error || '').toLowerCase();
-          if (errCode === 'no-speech') {
+          if (
+            shouldKeepListeningRef.current &&
+            (errCode === 'no-speech' || errCode === 'aborted')
+          ) {
             return;
           }
           if (
@@ -445,41 +598,45 @@ export const QuestionVoiceBar: React.FC<QuestionVoiceBarProps> = ({
             errCode === 'service-not-allowed' ||
             errCode === 'audio-capture'
           ) {
-            isRecordingRef.current = false;
-            shouldRestartSpeechRef.current = false;
-            setIsRecording(false);
-            setInterimTranscript('');
-            try {
-              recognition.onend = null;
-              recognition.abort?.();
-              recognition.stop?.();
-            } catch {
-              // Ignore
-            }
-            recognitionRef.current = null;
+            stopRecordingInternal();
             setErrorBanner(
-              'Permissão de microfone negada no navegador. Você também pode digitar seu raciocínio abaixo.'
+              errCode === 'audio-capture'
+                ? 'Dispositivo de microfone indisponível ou ocupado por outro programa.'
+                : 'Permissão de microfone negada no navegador. Você também pode digitar seu raciocínio abaixo.'
             );
           }
         };
 
         recognition.onend = () => {
-          if (isRecordingRef.current && shouldRestartSpeechRef.current) {
-            setTimeout(() => {
-              if (isRecordingRef.current && shouldRestartSpeechRef.current) {
+          if (isAndroid && sessionLatestTranscriptRef.current) {
+            confirmedTextRef.current = joinCleanSpeech(
+              sessionBaseConfirmedRef.current,
+              sessionLatestTranscriptRef.current
+            );
+            sessionLatestTranscriptRef.current = '';
+            setDraftTranscript(confirmedTextRef.current);
+            setInterimTranscript('');
+          }
+
+          if (isRecordingRef.current && shouldKeepListeningRef.current) {
+            if (restartTimerRef.current !== null && typeof window !== 'undefined') {
+              window.clearTimeout(restartTimerRef.current);
+            }
+            restartTimerRef.current = window.setTimeout(() => {
+              restartTimerRef.current = null;
+              if (isRecordingRef.current && shouldKeepListeningRef.current) {
                 createAndStartInstance();
               }
-            }, 150);
+            }, 120);
+          } else {
+            setIsRecording(false);
           }
         };
 
         recognitionRef.current = recognition;
         recognition.start();
       } catch {
-        isRecordingRef.current = false;
-        shouldRestartSpeechRef.current = false;
-        setIsRecording(false);
-        setInterimTranscript('');
+        stopRecordingInternal();
         setErrorBanner(
           'Não foi possível iniciar o microfone neste ambiente. Digite seu raciocínio no campo abaixo.'
         );
@@ -487,7 +644,7 @@ export const QuestionVoiceBar: React.FC<QuestionVoiceBarProps> = ({
     };
 
     createAndStartInstance();
-  }, []);
+  }, [stopRecordingInternal]);
 
   // Handle Microphone button click (including Barge-in interruption or immediate cancel when already recording)
   const handleMicButtonClick = async () => {
@@ -520,7 +677,9 @@ export const QuestionVoiceBar: React.FC<QuestionVoiceBarProps> = ({
         );
       }
 
-      finalizedTranscriptRef.current = '';
+      confirmedTextRef.current = '';
+      sessionBaseConfirmedRef.current = '';
+      sessionLatestTranscriptRef.current = '';
       setDraftTranscript('');
       setInterimTranscript('');
       startMicrophoneSession();
@@ -540,7 +699,9 @@ export const QuestionVoiceBar: React.FC<QuestionVoiceBarProps> = ({
     }
 
     // 5. Start recording session
-    finalizedTranscriptRef.current = draftTranscript;
+    confirmedTextRef.current = draftTranscript.trim();
+    sessionBaseConfirmedRef.current = confirmedTextRef.current;
+    sessionLatestTranscriptRef.current = '';
     startMicrophoneSession();
   };
 
@@ -591,7 +752,7 @@ export const QuestionVoiceBar: React.FC<QuestionVoiceBarProps> = ({
   // Submit student's reasoning to Quat (via voice or text input)
   const handleSubmitReasoning = async () => {
     if (isLoadingAI) return;
-    const fullStudentText = [draftTranscript, interimTranscript].filter(Boolean).join(' ').trim();
+    const fullStudentText = joinCleanSpeech(draftTranscript, interimTranscript).trim();
     if (!fullStudentText) {
       setErrorBanner('Fale ou digite seu raciocínio antes de enviar para o Quat.');
       return;
@@ -605,7 +766,9 @@ export const QuestionVoiceBar: React.FC<QuestionVoiceBarProps> = ({
     stopRecordingInternal();
     setDraftTranscript('');
     setInterimTranscript('');
-    finalizedTranscriptRef.current = '';
+    confirmedTextRef.current = '';
+    sessionBaseConfirmedRef.current = '';
+    sessionLatestTranscriptRef.current = '';
     setPendingStudentText(fullStudentText);
     setIsLoadingAI(true);
     setErrorBanner(null);
@@ -662,7 +825,8 @@ export const QuestionVoiceBar: React.FC<QuestionVoiceBarProps> = ({
       setPendingStudentText(null);
       setDraftTranscript(prev => {
         if (prev.trim()) return prev;
-        finalizedTranscriptRef.current = fullStudentText;
+        confirmedTextRef.current = fullStudentText;
+        sessionBaseConfirmedRef.current = fullStudentText;
         return fullStudentText;
       });
       const friendly = mapToStudentFriendlyError(err);
@@ -672,7 +836,7 @@ export const QuestionVoiceBar: React.FC<QuestionVoiceBarProps> = ({
     }
   };
 
-  const combinedLiveTranscript = [draftTranscript, interimTranscript].filter(Boolean).join(' ');
+  const combinedLiveTranscript = joinCleanSpeech(draftTranscript, interimTranscript);
 
   const isFloatingPopupOpen = isHistoryExpanded || isRecording || isLoadingAI;
 
@@ -1105,8 +1269,11 @@ export const QuestionVoiceBar: React.FC<QuestionVoiceBarProps> = ({
                   rows={2}
                   value={combinedLiveTranscript}
                   onChange={(e) => {
-                    finalizedTranscriptRef.current = e.target.value;
-                    setDraftTranscript(e.target.value);
+                    const val = e.target.value;
+                    confirmedTextRef.current = val;
+                    sessionBaseConfirmedRef.current = val;
+                    sessionLatestTranscriptRef.current = '';
+                    setDraftTranscript(val);
                     setInterimTranscript('');
                   }}
                   onKeyDown={(e) => {
@@ -1176,7 +1343,9 @@ export const QuestionVoiceBar: React.FC<QuestionVoiceBarProps> = ({
         onClose={() => setIsOnboardingOpen(false)}
         onAuthorized={() => {
           setIsOnboardingOpen(false);
-          finalizedTranscriptRef.current = draftTranscript;
+          confirmedTextRef.current = draftTranscript.trim();
+          sessionBaseConfirmedRef.current = confirmedTextRef.current;
+          sessionLatestTranscriptRef.current = '';
           startMicrophoneSession();
         }}
       />
