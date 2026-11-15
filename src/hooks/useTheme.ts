@@ -11,6 +11,11 @@ const THEME_TOPBAR_COLORS: Record<ThemeMode, string> = {
 
 export const applyThemeToDOM = (themeMode: ThemeMode) => {
   const root = document.documentElement;
+  root.style.removeProperty('--theme-bg');
+  root.style.removeProperty('--theme-app-bg');
+  root.style.removeProperty('--theme-text-primary');
+  root.style.removeProperty('--theme-accent');
+  root.style.removeProperty('--theme-accent-contrast');
   root.setAttribute('data-theme', themeMode);
 
   // ONLY 'dark' mode uses Tailwind's .dark class (AMOLED Slate / Electric Indigo).

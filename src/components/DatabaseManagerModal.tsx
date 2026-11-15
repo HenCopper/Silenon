@@ -764,7 +764,7 @@ export const DatabaseManagerModal: React.FC<DatabaseManagerModalProps> = ({
                         await onRestoreDefault();
                         setFeedback({
                           type: 'success',
-                          message: 'Bancos padrão (ENEM 2024 e ENEM 2025) restaurados com sucesso.',
+                          message: 'Bancos padrão (ENEM 2023, ENEM 2024 e ENEM 2025) restaurados com sucesso.',
                         });
                       } catch (err) {
                         const msg = err instanceof Error ? err.message : 'Erro desconhecido';
@@ -865,7 +865,7 @@ export const DatabaseManagerModal: React.FC<DatabaseManagerModalProps> = ({
             {showConfirmRestore && (
               <div className="p-3 bg-accent-subtle border border-accent/40 rounded-lg flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs animate-in fade-in duration-150">
                 <div className="text-accent leading-snug">
-                  Substituir todos os bancos pelos <strong className="font-semibold">bancos padrão (ENEM 2024 e ENEM 2025)</strong>?
+                  Substituir todos os bancos pelos <strong className="font-semibold">bancos padrão (ENEM 2023, ENEM 2024 e ENEM 2025)</strong>?
                 </div>
                 <div className="flex items-center justify-between sm:justify-end gap-2 w-full sm:w-auto shrink-0">
                   <button
@@ -887,7 +887,7 @@ export const DatabaseManagerModal: React.FC<DatabaseManagerModalProps> = ({
                         setShowConfirmRestore(false);
                         setFeedback({
                           type: 'success',
-                          message: 'Bancos padrão (ENEM 2024 e ENEM 2025) restaurados com sucesso.',
+                          message: 'Bancos padrão (ENEM 2023, ENEM 2024 e ENEM 2025) restaurados com sucesso.',
                         });
                       } catch (err) {
                         const msg = err instanceof Error ? err.message : 'Erro desconhecido';

@@ -11,7 +11,12 @@ import {
   SimuladoResult, 
   UserStatistics 
 } from '../types/question';
-import { initialQuestionBank, loadDefaultZipQuestionBanks } from '../data/question_bank';
+import {
+  initialQuestionBank,
+  getMissingDefaultZipBanks,
+  isDefaultBankPresent,
+  loadDefaultZipQuestionBanks,
+} from '../data/question_bank';
 import { LocalStorageManager, defaultStatistics } from '../lib/storage';
 import { FastSearchEngine } from '../lib/searchEngine';
 import { calculateNextSRS, isItemDueForReview } from '../lib/srsEngine';
@@ -77,30 +82,38 @@ export function useStudyData({ currentMode }: UseStudyDataOptions) {
 
   const bootstrapDefaultBanks = useCallback(async () => {
     const existing = LocalStorageManager.getDatabases(initialQuestionBank.question_bank);
-    if (existing.length > 0) {
+    const missingSpecs = getMissingDefaultZipBanks(existing);
+
+    if (existing.length > 0 && missingSpecs.length === 0) {
       setDatabases(existing);
       setIsLoadingDefaultBanks(false);
       setDefaultBanksError(null);
       return;
     }
 
-    setIsLoadingDefaultBanks(true);
+    const isFreshInstall = existing.length === 0;
+    if (isFreshInstall) {
+      setIsLoadingDefaultBanks(true);
+    }
     setDefaultBanksError(null);
 
     try {
-      const importedBanks = await loadDefaultZipQuestionBanks();
+      const specsToLoad = isFreshInstall ? undefined : missingSpecs;
+      const importedBanks = await loadDefaultZipQuestionBanks(specsToLoad);
 
-      // Re-check after async work to stay idempotent under StrictMode/concurrent mounts
+      // Re-read current databases after async work to stay idempotent and preserve user data
       const currentSaved = LocalStorageManager.getDatabases(initialQuestionBank.question_bank);
-      if (currentSaved.length > 0) {
-        setDatabases(currentSaved);
-        return;
-      }
-
-      let nextDatabases: QuestionDatabase[] = [];
+      let nextDatabases: QuestionDatabase[] = [...currentSaved];
       let initialActiveDatabaseId: string | 'all' = 'all';
 
       for (const bank of importedBanks) {
+        const alreadyPresent = isDefaultBankPresent(nextDatabases, {
+          url: '',
+          filename: bank.filename,
+          isInitialActive: bank.isInitialActive,
+        });
+        if (alreadyPresent) continue;
+
         const { updatedDatabases, newDatabaseId } = LocalStorageManager.addDatabase(
           {
             name: bank.name,
@@ -112,36 +125,38 @@ export function useStudyData({ currentMode }: UseStudyDataOptions) {
           nextDatabases
         );
         nextDatabases = updatedDatabases;
-        if (bank.isInitialActive) {
+        if (isFreshInstall && bank.isInitialActive) {
           initialActiveDatabaseId = newDatabaseId;
         }
       }
 
-      if (initialActiveDatabaseId === 'all' && nextDatabases.length > 0) {
-        initialActiveDatabaseId = nextDatabases[nextDatabases.length - 1].id;
+      if (isFreshInstall) {
+        if (initialActiveDatabaseId === 'all' && nextDatabases.length > 0) {
+          initialActiveDatabaseId = nextDatabases[nextDatabases.length - 1].id;
+        }
+        LocalStorageManager.saveActiveDatabaseId(initialActiveDatabaseId);
+        setFilters((prev) => ({ ...prev, database_id: initialActiveDatabaseId }));
+        setCurrentIndex(LocalStorageManager.getLastQuestionIndex(initialActiveDatabaseId));
       }
 
-      LocalStorageManager.saveActiveDatabaseId(initialActiveDatabaseId);
       setDatabases(nextDatabases);
-      setFilters((prev) => ({ ...prev, database_id: initialActiveDatabaseId }));
-      setCurrentIndex(LocalStorageManager.getLastQuestionIndex(initialActiveDatabaseId));
     } catch (err) {
-      const message =
-        err instanceof Error
-          ? err.message
-          : 'Não foi possível carregar os bancos de questões iniciais.';
-      setDefaultBanksError(message);
+      if (isFreshInstall) {
+        const message =
+          err instanceof Error
+            ? err.message
+            : 'Não foi possível carregar os bancos de questões iniciais.';
+        setDefaultBanksError(message);
+      } else {
+        console.warn('[useStudyData] Falha silenciosa ao sincronizar bancos padrão ausentes:', err);
+      }
     } finally {
       setIsLoadingDefaultBanks(false);
     }
   }, []);
 
   useEffect(() => {
-    if (LocalStorageManager.getDatabases(initialQuestionBank.question_bank).length === 0) {
-      void bootstrapDefaultBanks();
-    } else {
-      setIsLoadingDefaultBanks(false);
-    }
+    void bootstrapDefaultBanks();
   }, [bootstrapDefaultBanks]);
 
   // 3. High-performance Search Engine Instance
@@ -488,11 +503,12 @@ export function useStudyData({ currentMode }: UseStudyDataOptions) {
     setIsLoadingDefaultBanks(true);
     setDefaultBanksError(null);
     try {
+      const importedBanks = await loadDefaultZipQuestionBanks();
+
       await Promise.all(
         databases.map((db) => deleteDatabaseMedia(db.id).catch(() => {}))
       );
 
-      const importedBanks = await loadDefaultZipQuestionBanks();
       let nextDatabases: QuestionDatabase[] = [];
       let initialActiveDatabaseId: string | 'all' = 'all';
 

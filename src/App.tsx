@@ -426,7 +426,7 @@ export default function App() {
                             Carregando bancos iniciais...
                           </h3>
                           <p className="text-xs text-muted theme-text-muted max-w-sm mx-auto">
-                            Importando as provas do ENEM 2024 e ENEM 2025 para seu dispositivo.
+                            Importando as provas do ENEM 2023, ENEM 2024 e ENEM 2025 para seu dispositivo.
                           </p>
                         </div>
                       ) : defaultBanksError && databases.length === 0 ? (

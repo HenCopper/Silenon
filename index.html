@@ -9,7 +9,7 @@
     <meta property="og:description" content="Plataforma offline de fixação acelerada de conteúdo, filtros ultra-rápidos e banco de questões estruturado em JSON." />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="theme-color" content="#100300" />
+    <meta name="theme-color" content="#f1f5f9" />
     
     <!-- Mobile & PWA optimization (iOS & Android) -->
     <link rel="manifest" href="/manifest.json" />
@@ -33,7 +33,7 @@
           try {
             p = localStorage.getItem('memoriz_prefs_v1') || localStorage.getItem('memoriz_prefs') || localStorage.getItem('memoriz_theme');
           } catch (storageErr) {}
-          var t = 'night';
+          var t = 'light';
           if (p) {
             if (p.charCodeAt(0) === 123) { // starts with '{'
               try {
@@ -51,7 +51,7 @@
             reading: { b: '#fbf5e8', t: '#2b1d0c', a: '#854d0e', ac: '#ffffff' },
             night:   { b: '#100300', t: '#ff7733', a: '#ff2b00', ac: '#100300' }
           };
-          var c = C[t] || C.night;
+          var c = C[t] || C.light;
           var s = document.documentElement.style;
           s.setProperty('--theme-bg', c.b);
           s.setProperty('--theme-app-bg', c.b);
