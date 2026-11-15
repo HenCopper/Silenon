@@ -13,7 +13,9 @@ import {
 } from '../types/question';
 import {
   initialQuestionBank,
+  findMatchingDefaultDatabase,
   getMissingDefaultZipBanks,
+  getOutdatedDefaultZipBanks,
   isDefaultBankPresent,
   loadDefaultZipQuestionBanks,
 } from '../data/question_bank';
@@ -83,8 +85,9 @@ export function useStudyData({ currentMode }: UseStudyDataOptions) {
   const bootstrapDefaultBanks = useCallback(async () => {
     const existing = LocalStorageManager.getDatabases(initialQuestionBank.question_bank);
     const missingSpecs = getMissingDefaultZipBanks(existing);
+    const outdatedSpecs = getOutdatedDefaultZipBanks(existing);
 
-    if (existing.length > 0 && missingSpecs.length === 0) {
+    if (existing.length > 0 && missingSpecs.length === 0 && outdatedSpecs.length === 0) {
       setDatabases(existing);
       setIsLoadingDefaultBanks(false);
       setDefaultBanksError(null);
@@ -98,21 +101,63 @@ export function useStudyData({ currentMode }: UseStudyDataOptions) {
     setDefaultBanksError(null);
 
     try {
-      const specsToLoad = isFreshInstall ? undefined : missingSpecs;
+      const specsToLoad = isFreshInstall ? undefined : [...missingSpecs, ...outdatedSpecs];
       const importedBanks = await loadDefaultZipQuestionBanks(specsToLoad);
 
       // Re-read current databases after async work to stay idempotent and preserve user data
       const currentSaved = LocalStorageManager.getDatabases(initialQuestionBank.question_bank);
       let nextDatabases: QuestionDatabase[] = [...currentSaved];
       let initialActiveDatabaseId: string | 'all' = 'all';
+      let didMutateExisting = false;
 
       for (const bank of importedBanks) {
-        const alreadyPresent = isDefaultBankPresent(nextDatabases, {
+        const specStub = {
           url: '',
           filename: bank.filename,
           isInitialActive: bank.isInitialActive,
-        });
-        if (alreadyPresent) continue;
+        };
+        const existingMatchedDb = findMatchingDefaultDatabase(nextDatabases, specStub);
+
+        if (existingMatchedDb) {
+          const importedByRef = new Map<string, Question>();
+          for (const iq of bank.questions) {
+            const refKey = String(iq.metadata?.reference_code || iq.sequence_id || '').trim();
+            if (refKey) importedByRef.set(refKey, iq);
+          }
+
+          nextDatabases = nextDatabases.map((db) => {
+            if (db.id !== existingMatchedDb.id) return db;
+            didMutateExisting = true;
+            return {
+              ...db,
+              questions: db.questions.map((eq, idx) => {
+                const refKey = String(eq.metadata?.reference_code || '').trim();
+                const freshQ = (refKey && importedByRef.get(refKey)) || bank.questions[idx];
+                if (!freshQ) return eq;
+                return {
+                  ...eq,
+                  resolution: {
+                    ...eq.resolution,
+                    cot_reasoning: freshQ.resolution?.cot_reasoning || eq.resolution.cot_reasoning,
+                    pedagogical_explanation:
+                      freshQ.resolution?.pedagogical_explanation || eq.resolution.pedagogical_explanation,
+                  },
+                  options: (eq.options || []).map((opt) => {
+                    const freshOpt = (freshQ.options || []).find(
+                      (fo) => String(fo.letter || '').toUpperCase() === String(opt.letter || '').toUpperCase()
+                    );
+                    return freshOpt?.why_wrong_or_right
+                      ? { ...opt, why_wrong_or_right: freshOpt.why_wrong_or_right }
+                      : opt;
+                  }),
+                };
+              }),
+            };
+          });
+          continue;
+        }
+
+        if (isDefaultBankPresent(nextDatabases, specStub)) continue;
 
         const { updatedDatabases, newDatabaseId } = LocalStorageManager.addDatabase(
           {
@@ -128,6 +173,10 @@ export function useStudyData({ currentMode }: UseStudyDataOptions) {
         if (isFreshInstall && bank.isInitialActive) {
           initialActiveDatabaseId = newDatabaseId;
         }
+      }
+
+      if (didMutateExisting) {
+        LocalStorageManager.saveDatabases(nextDatabases);
       }
 
       if (isFreshInstall) {

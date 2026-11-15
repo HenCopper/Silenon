@@ -194,6 +194,7 @@ export const ErrorNotebookView: React.FC<ErrorNotebookViewProps> = ({
           question={activeQ}
           currentIndex={safeIndex}
           totalFiltered={activeSessionList.length}
+          allowRetryWrong={true}
           onPrev={() => setActiveSessionIndex(prev => (prev !== null && prev > 0 ? prev - 1 : prev))}
           onNext={() => {
             if (safeIndex < activeSessionList.length - 1) {

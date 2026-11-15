@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   CheckCircle2, 
   XCircle, 
@@ -37,9 +37,15 @@ export const ResolutionSection: React.FC<ResolutionSectionProps> = ({
   onSaveNote,
   isGenerating = false,
 }) => {
-  const [showCoT, setShowCoT] = useState(false);
+  const [showCoT, setShowCoT] = useState(!isCorrect);
   const [editingNote, setEditingNote] = useState(false);
   const [currentNote, setCurrentNote] = useState(note);
+
+  useEffect(() => {
+    if (!isCorrect) {
+      setShowCoT(true);
+    }
+  }, [isCorrect, selectedLetter]);
 
   const rawCotContent = resolution.cot_reasoning || (resolution as any).chain_of_thought || (resolution as any).raciocinio || (resolution as any).passo_a_passo || (resolution as any).resolucao || '';
   const rawPedagogicalContent = resolution.pedagogical_explanation || (resolution as any).explanation || (resolution as any).comentario || (resolution as any).justificativa || '';
@@ -47,9 +53,15 @@ export const ResolutionSection: React.FC<ResolutionSectionProps> = ({
   const pedagogicalContent = isGenericResolutionText(rawPedagogicalContent) ? '' : rawPedagogicalContent;
   const deducedAnswer = (resolution.deduced_answer || (resolution as any).gabarito || (resolution as any).correct_answer || '').toUpperCase();
 
-  const validOptionComments = Array.isArray(options)
-    ? options.filter((opt) => !isGenericResolutionText(opt.why_wrong_or_right))
-    : [];
+  const markedLetter = (selectedLetter || deducedAnswer || '').trim().toUpperCase();
+  const selectedOption = Array.isArray(options)
+    ? options.find((opt) => String(opt.letter || '').trim().toUpperCase() === markedLetter)
+    : undefined;
+  const selectedOptionComment =
+    selectedOption && !isGenericResolutionText(selectedOption.why_wrong_or_right)
+      ? selectedOption.why_wrong_or_right.trim()
+      : '';
+  const singlePedagogicalComment = selectedOptionComment || pedagogicalContent;
 
   const habilidadeInep = metadata?.habilidade_inep?.trim() || '';
   const triSummary = (() => {
@@ -112,7 +124,14 @@ export const ResolutionSection: React.FC<ResolutionSectionProps> = ({
             </div>
             {!isCorrect && (
               <p className="text-xs opacity-90 leading-relaxed font-medium theme-text-secondary">
-                Gabarito oficial: <span className="font-bold">Alternativa {deducedAnswer}</span>
+                {selectedLetter ? (
+                  <>
+                    Alternativa marcada: <span className="font-bold">{selectedLetter}</span>. Revise o conceito em{' '}
+                    <span className="font-semibold">Destrinchando</span> e refaça esta questão no Caderno de Erros.
+                  </>
+                ) : (
+                  <>Revise o conceito em Destrinchando e refaça esta questão no Caderno de Erros.</>
+                )}
               </p>
             )}
           </div>
@@ -137,8 +156,8 @@ export const ResolutionSection: React.FC<ResolutionSectionProps> = ({
         </div>
       )}
 
-      {/* Comentário Pedagógico (Curto e direto sobre por que cada alternativa está certa ou errada) */}
-      {(validOptionComments.length > 0 || pedagogicalContent || isGenerating) && (
+      {/* Comentário Pedagógico — Exibido apenas quando o aluno ACERTOU, mostrando exclusivamente a justificativa da alternativa marcada */}
+      {isCorrect && (singlePedagogicalComment || isGenerating) && (
         <div
           data-question-selectable="true"
           className="bg-surface-subtle border border-border rounded-lg p-4 space-y-2.5"
@@ -148,60 +167,29 @@ export const ResolutionSection: React.FC<ResolutionSectionProps> = ({
               <Sparkles className="w-3.5 h-3.5" />
               <span>Comentário Pedagógico</span>
             </div>
-            {isGenerating && validOptionComments.length === 0 && !pedagogicalContent && (
+            {isGenerating && !singlePedagogicalComment && (
               <span className="inline-flex items-center gap-1.5 text-[11px] text-muted">
                 <Loader2 className="w-3 h-3 animate-spin text-accent" />
-                <span>Gerando comentários...</span>
+                <span>Gerando comentário...</span>
               </span>
             )}
           </div>
 
-          {validOptionComments.length > 0 ? (
-            <div className="space-y-1.5">
-              {(options || []).map((opt) => {
-                const comment = !isGenericResolutionText(opt.why_wrong_or_right)
-                  ? opt.why_wrong_or_right.trim()
-                  : '';
-                if (!comment) return null;
-                const isOptCorrect = opt.letter.toUpperCase() === deducedAnswer;
-                const isOptSelected =
-                  selectedLetter && opt.letter.toUpperCase() === selectedLetter.toUpperCase();
-
-                return (
-                  <div
-                    key={opt.letter}
-                    className={`flex items-start gap-2.5 p-2 rounded-lg text-xs sm:text-sm leading-relaxed ${
-                      isOptCorrect
-                        ? 'bg-success-bg/60 border border-success-border/60 text-primary theme-text-primary'
-                        : isOptSelected && !isOptCorrect
-                        ? 'bg-danger-bg/50 border border-danger-border/50 text-primary theme-text-primary'
-                        : 'text-secondary theme-text-secondary'
-                    }`}
-                  >
-                    <span
-                      className={`w-5 h-5 rounded flex items-center justify-center font-bold text-[11px] shrink-0 mt-0.5 ${
-                        isOptCorrect
-                          ? 'bg-success text-success-contrast'
-                          : 'bg-surface border border-border text-secondary'
-                      }`}
-                    >
-                      {opt.letter}
-                    </span>
-                    <span className="flex-1">{comment}</span>
-                  </div>
-                );
-              })}
+          {singlePedagogicalComment && (
+            <div className="flex items-start gap-2.5 p-2.5 rounded-lg bg-success-bg/60 border border-success-border/60 text-xs sm:text-sm leading-relaxed text-primary theme-text-primary">
+              {markedLetter && (
+                <span className="w-5 h-5 rounded flex items-center justify-center font-bold text-[11px] shrink-0 mt-0.5 bg-success text-success-contrast">
+                  {markedLetter}
+                </span>
+              )}
+              <span className="flex-1 whitespace-pre-line">{singlePedagogicalComment}</span>
             </div>
-          ) : pedagogicalContent ? (
-            <div className="text-primary theme-text-primary text-sm leading-relaxed whitespace-pre-line">
-              {pedagogicalContent}
-            </div>
-          ) : null}
+          )}
         </div>
       )}
 
       {/* Resolution Media (Images, Diagrams, Audio/Video explanations) */}
-      {resolution.media && resolution.media.length > 0 && (
+      {isCorrect && resolution.media && resolution.media.length > 0 && (
         <div className="space-y-3">
           {resolution.media.map((item, idx) => (
             <div key={idx} className="rounded-lg overflow-hidden border border-border bg-surface-subtle p-2 max-w-2xl mx-auto">

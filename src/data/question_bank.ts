@@ -35,16 +35,16 @@ export const DEFAULT_ZIP_BANKS: DefaultZipBankSpec[] = [
   },
 ];
 
-export function isDefaultBankPresent(
+export function findMatchingDefaultDatabase(
   databases: QuestionDatabase[],
   spec: DefaultZipBankSpec
-): boolean {
+): QuestionDatabase | undefined {
   const targetFilename = spec.filename.trim().toLowerCase();
   const targetStem = targetFilename.replace(/\.zip$/i, '');
   const yearMatch = spec.filename.match(/\b(20\d{2})\b/);
   const targetYear = yearMatch ? Number(yearMatch[1]) : null;
 
-  return databases.some((db) => {
+  return databases.find((db) => {
     if (!db) return false;
     if (typeof db.filename === 'string' && db.filename.trim().toLowerCase() === targetFilename) {
       return true;
@@ -72,10 +72,30 @@ export function isDefaultBankPresent(
   });
 }
 
+export function isDefaultBankPresent(
+  databases: QuestionDatabase[],
+  spec: DefaultZipBankSpec
+): boolean {
+  return Boolean(findMatchingDefaultDatabase(databases, spec));
+}
+
 export function getMissingDefaultZipBanks(
   databases: QuestionDatabase[]
 ): DefaultZipBankSpec[] {
   return DEFAULT_ZIP_BANKS.filter((spec) => !isDefaultBankPresent(databases, spec));
+}
+
+export function getOutdatedDefaultZipBanks(
+  databases: QuestionDatabase[]
+): DefaultZipBankSpec[] {
+  return DEFAULT_ZIP_BANKS.filter((spec) => {
+    const matchedDb = findMatchingDefaultDatabase(databases, spec);
+    if (!matchedDb || !Array.isArray(matchedDb.questions) || matchedDb.questions.length === 0) {
+      return false;
+    }
+    const sampleCot = String(matchedDb.questions[0]?.resolution?.cot_reasoning || '').trim();
+    return !sampleCot || /^Questão\s+\d+\s+do\s+Caderno/i.test(sampleCot);
+  });
 }
 
 const inFlightBanksPromises = new Map<string, Promise<LoadedDefaultZipBank[]>>();

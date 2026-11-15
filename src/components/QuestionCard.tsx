@@ -168,6 +168,7 @@ interface QuestionCardProps {
   sequenceLabel?: string;
   eliminatedOptionsExpirationMs?: number;
   onOpenAIAssistant?: () => void;
+  allowRetryWrong?: boolean;
 }
 
 export const QuestionCard: React.FC<QuestionCardProps> = ({
@@ -194,6 +195,7 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
   sequenceLabel,
   eliminatedOptionsExpirationMs = DEFAULT_ELIMINATED_OPTIONS_EXPIRATION_MS,
   onOpenAIAssistant,
+  allowRetryWrong = false,
 }) => {
   const [selectedLetter, setSelectedLetter] = useState<string>('');
   const [showResolution, setShowResolution] = useState<boolean>(false);
@@ -246,14 +248,18 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
 
   const isAnswered = !!lastAnswer;
   const isSolvedCorrectly = isAnswered && lastAnswer.is_correct === true;
+  const isAnsweredWrong = isAnswered && lastAnswer.is_correct === false;
+  const isLockedByAnswer = isSolvedCorrectly || (!allowRetryWrong && isAnsweredWrong);
   const isShowingOfficialResolution = isSolvedCorrectly && showResolution;
+  const isShowingWrongPracticeResolution = !allowRetryWrong && isAnsweredWrong && showResolution;
+  const isInteractionLocked = isShowingOfficialResolution || (!allowRetryWrong && isAnswered);
 
   // Active strikes to display:
-  // 1. When official resolution is shown: immutable snapshot of strikes when answered
+  // 1. When locked in Practice or official resolution is shown: immutable snapshot of strikes when answered
   // 2. When question is answered but resolution is hidden: independent review strikes
   // 3. When question is not yet answered: active strikes from parent
   const currentDisplayedStrikes = useMemo(() => {
-    if (isShowingOfficialResolution) {
+    if (isShowingOfficialResolution || (!allowRetryWrong && isAnswered)) {
       return answeredStrikes;
     }
     if (isSolvedCorrectly && !showResolution) {
@@ -269,7 +275,9 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
     }
     return strikes;
   }, [
-    isShowingOfficialResolution, 
+    isShowingOfficialResolution,
+    allowRetryWrong,
+    isAnswered,
     answeredStrikes, 
     isSolvedCorrectly, 
     showResolution, 
@@ -408,7 +416,7 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
         setReviewStrikes(lastAnswer.eliminated_options);
       }
 
-      if (lastAnswer && lastAnswer.is_correct) {
+      if (lastAnswer && (lastAnswer.is_correct || !allowRetryWrong)) {
         setSelectedLetter(lastAnswer.selected_letter);
         setShowResolution(true);
         activeTimeElapsedRef.current = lastAnswer.time_spent_seconds || 0;
@@ -419,16 +427,16 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
       }
       setDragOffset(null);
     } else if (isNewAnswerSubmission && lastAnswer) {
-      if (lastAnswer.is_correct) {
+      if (lastAnswer.is_correct || !allowRetryWrong) {
         setSelectedLetter(lastAnswer.selected_letter);
         setShowResolution(true);
       }
       activeTimeElapsedRef.current = lastAnswer.time_spent_seconds || 0;
     }
-  }, [question.sequence_id, lastAnswer, eliminatedOptionsExpirationMs, initialElapsedSeconds]);
+  }, [question.sequence_id, lastAnswer, eliminatedOptionsExpirationMs, initialElapsedSeconds, allowRetryWrong]);
 
   const handleStrike = (letter: string) => {
-    if (isShowingOfficialResolution) return;
+    if (isInteractionLocked) return;
     hasUserModifiedStrikesInSessionRef.current = true;
     lastStrikeActionTimestampRef.current = Date.now();
 
@@ -446,7 +454,7 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
   };
 
   const handleUnstrike = (letter: string) => {
-    if (isShowingOfficialResolution) return;
+    if (isInteractionLocked) return;
     hasUserModifiedStrikesInSessionRef.current = true;
     lastStrikeActionTimestampRef.current = Date.now();
 
@@ -460,7 +468,7 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
   };
 
   const handleToggleStrikeOption = (letter: string) => {
-    if (isShowingOfficialResolution) return;
+    if (isInteractionLocked) return;
     if (currentDisplayedStrikes.includes(letter)) {
       handleUnstrike(letter);
     } else {
@@ -469,16 +477,17 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
   };
 
   const handleSubmit = () => {
-    if (isSolvedCorrectly) {
-      // Re-reveal official resolution without overwriting previous history
-      setSelectedLetter(lastAnswer.selected_letter);
+    if (isLockedByAnswer) {
+      if (lastAnswer) {
+        setSelectedLetter(lastAnswer.selected_letter);
+      }
       setShowResolution(true);
       return;
     }
     if (!selectedLetter) return;
     const finalTime = Math.max(1, activeTimeElapsedRef.current);
     const isAnswerCorrect = selectedLetter === question.resolution.deduced_answer;
-    if (isAnswerCorrect) {
+    if (isAnswerCorrect || !allowRetryWrong) {
       setShowResolution(true);
     } else {
       setShowResolution(false);
@@ -490,23 +499,22 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
 
   const handleToggleResolution = () => {
     if (showResolution) {
-      // Ocultar gabarito: clear selection and show clean original state with empty review strikes
       setShowResolution(false);
-      setSelectedLetter('');
-      setReviewStrikes([]);
+      if (allowRetryWrong) {
+        setSelectedLetter('');
+        setReviewStrikes([]);
+      }
     } else {
-      // Ver gabarito comentado: restore snapshot at the moment they answered
       if (lastAnswer) {
         setSelectedLetter(lastAnswer.selected_letter);
       }
       setShowResolution(true);
-      // currentDisplayedStrikes automatically resolves to answeredStrikes!
     }
   };
 
   // Touch gesture handlers for drag-to-strike
   const handleTouchStart = (e: React.TouchEvent, letter: string) => {
-    if (isShowingOfficialResolution) return;
+    if (isInteractionLocked) return;
     const touch = e.touches[0];
     touchStateRef.current = {
       startX: touch.clientX,
@@ -520,7 +528,7 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
 
   const handleTouchMove = (e: React.TouchEvent, letter: string) => {
     if (!touchStateRef.current || touchStateRef.current.letter !== letter) return;
-    if (isShowingOfficialResolution) return;
+    if (isInteractionLocked) return;
 
     const touch = e.touches[0];
     const diffX = touch.clientX - touchStateRef.current.startX;
@@ -575,7 +583,7 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
   // Mouse & Click handlers (Right-click: strike, Left-click: unstrike or select)
   const handleContextMenu = (e: React.MouseEvent, letter: string, isStriked: boolean) => {
     e.preventDefault();
-    if (isShowingOfficialResolution) return;
+    if (isInteractionLocked) return;
 
     if (!isStriked) {
       // Right click strikes
@@ -588,7 +596,7 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
 
   const handleOptionClick = (letter: string, isStriked: boolean) => {
     if (swipedJustNowRef.current) return;
-    if (isShowingOfficialResolution) return;
+    if (isInteractionLocked) return;
 
     if (isStriked) {
       // Left click / tap on striked option unstrikes (returns to original state)
@@ -610,7 +618,7 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
       }
 
       const key = e.key.toUpperCase();
-      if (!isShowingOfficialResolution && ['A', 'B', 'C', 'D', 'E'].includes(key)) {
+      if (!isInteractionLocked && ['A', 'B', 'C', 'D', 'E'].includes(key)) {
         // Check if question has this option
         if (question.options.some(o => o.letter.toUpperCase() === key)) {
           e.preventDefault();
@@ -618,12 +626,12 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
         }
       } else if (e.key === 'Enter') {
         e.preventDefault();
-        if (isAnswered && !showResolution) {
+        if (isSolvedCorrectly && !showResolution) {
           handleToggleResolution();
-        } else if (!isAnswered && selectedLetter) {
+        } else if (!isLockedByAnswer && selectedLetter) {
           handleSubmit();
         }
-      } else if (isAnswered && (e.key.toLowerCase() === 'g')) {
+      } else if (isSolvedCorrectly && (e.key.toLowerCase() === 'g')) {
         e.preventDefault();
         handleToggleResolution();
       }
@@ -631,7 +639,7 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isAnswered, showResolution, isShowingOfficialResolution, selectedLetter, question.options, isPaused, lastAnswer]);
+  }, [isAnswered, isSolvedCorrectly, isLockedByAnswer, isInteractionLocked, showResolution, selectedLetter, question.options, isPaused, lastAnswer]);
 
   return (
     <div className="theme-card border border-border rounded-xl p-6 sm:p-8 space-y-6 shadow-xs">
@@ -677,8 +685,8 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
           {/* Subcomponente isolado e memoizado: zero re-renderizações da questão a cada segundo */}
           <QuestionTimerBadge
             isPaused={isPaused}
-            isSolved={isSolvedCorrectly || showResolution}
-            initialSeconds={isSolvedCorrectly ? (lastAnswer?.time_spent_seconds || 0) : (initialElapsedSeconds || 0)}
+            isSolved={isLockedByAnswer || showResolution}
+            initialSeconds={isLockedByAnswer ? (lastAnswer?.time_spent_seconds || 0) : (initialElapsedSeconds || 0)}
             onTick={onUpdateElapsedSeconds}
             timeRef={activeTimeElapsedRef}
           />
@@ -775,7 +783,7 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
       )}
 
       {/* Options Header Hint */}
-      {!isShowingOfficialResolution && showTips && (
+      {!isInteractionLocked && showTips && (
         <div className="flex items-center justify-end text-xs text-muted theme-text-muted pb-0.5 px-0.5">
           <span
             onClick={() => setIsDisableTipsModalOpen(true)}
@@ -798,13 +806,21 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
           const currentDragX = isBeingDragged ? dragOffset.x : 0;
           const isAttemptedWrong = !isSolvedCorrectly && lastAnswer && !lastAnswer.is_correct && opt.letter === lastAnswer.selected_letter;
           
-          let cardStyle = 'theme-card hover:border-[var(--theme-border-hover)] text-primary theme-text-primary';
+          let cardStyle = isInteractionLocked
+            ? 'theme-card text-primary theme-text-primary'
+            : 'theme-card hover:border-[var(--theme-border-hover)] text-primary theme-text-primary';
           
           if (isShowingOfficialResolution) {
             if (isCorrectOption) {
               cardStyle = 'theme-option-correct font-medium';
             } else {
               cardStyle = 'opacity-40 theme-card-subtle text-muted';
+            }
+          } else if (!allowRetryWrong && isAnsweredWrong) {
+            if (isAttemptedWrong) {
+              cardStyle = 'theme-option-wrong font-medium';
+            } else {
+              cardStyle = 'opacity-60 theme-card-subtle text-muted';
             }
           } else if (isAttemptedWrong) {
             cardStyle = 'theme-option-wrong font-medium';
@@ -818,7 +834,7 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
               className="relative overflow-hidden rounded-lg touch-pan-y select-none"
             >
               {/* Swipe-to-strike background indicator for touch screens */}
-              {isBeingDragged && Math.abs(currentDragX) > 10 && !isShowingOfficialResolution && (
+              {isBeingDragged && Math.abs(currentDragX) > 10 && !isInteractionLocked && (
                 <div 
                   className={`absolute inset-0 flex items-center px-4 rounded-lg transition-colors pointer-events-none ${
                     Math.abs(currentDragX) >= 30
@@ -846,10 +862,10 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
                   transition: isBeingDragged ? 'none' : 'transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1)',
                 }}
                 className={`group flex items-start gap-3 p-3.5 sm:p-4 rounded-lg transition-all relative ${cardStyle} ${
-                  isStriked ? 'strikethrough-option cursor-pointer' : 'cursor-pointer'
-                }`}
+                  isStriked ? 'strikethrough-option' : ''
+                } ${isInteractionLocked ? 'cursor-default' : 'cursor-pointer'}`}
                 title={
-                  isShowingOfficialResolution 
+                  isInteractionLocked 
                     ? undefined 
                     : isStriked 
                     ? 'Alternativa riscada. Clique com o botão esquerdo (ou toque) para desriscar e restaurar.' 
@@ -901,7 +917,7 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
                 </div>
 
                 {/* Strikethrough Status Badge & Eliminator Button */}
-                {!isShowingOfficialResolution && (
+                {!isInteractionLocked && (
                   <div className="flex items-center gap-1.5 shrink-0 pt-0.5">
                     {isStriked && (
                       <span className="text-[10px] font-medium px-1.5 py-0.5 rounded flex items-center gap-1 theme-pill-striked">
@@ -931,8 +947,8 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
         })}
       </div>
 
-      {/* Wrong Answer Feedback Notice */}
-      {!isSolvedCorrectly && lastAnswer && !lastAnswer.is_correct && (
+      {/* Wrong Answer Feedback Notice (Exclusively in Caderno de Erros retry mode) */}
+      {allowRetryWrong && !isSolvedCorrectly && lastAnswer && !lastAnswer.is_correct && (
         <div className="p-3 rounded-xl border border-danger-border bg-danger-bg text-danger text-xs flex items-center justify-between gap-2.5 animate-in fade-in duration-150">
           <div className="flex items-center gap-2">
             <XCircle className="w-4 h-4 shrink-0 text-danger" />
@@ -979,6 +995,11 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
               <Sparkles className="w-3.5 h-3.5" />
               <span>{showResolution ? 'Ocultar Gabarito (G)' : 'Ver Gabarito Comentado (G)'}</span>
             </button>
+          ) : !allowRetryWrong && isAnsweredWrong ? (
+            <span className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-danger-bg border border-danger-border text-danger text-xs font-semibold select-none">
+              <XCircle className="w-3.5 h-3.5 shrink-0" />
+              <span>Refaça no Caderno de Erros</span>
+            </span>
           ) : (
             <button
               id="submit-answer-btn"
@@ -995,12 +1016,12 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
       </div>
 
       {/* Resolution & Commentary Section */}
-      {isShowingOfficialResolution && (
+      {(isShowingOfficialResolution || isShowingWrongPracticeResolution) && (
         <ResolutionSection
           resolution={effectiveResolution}
           options={effectiveOptions}
           metadata={question.metadata}
-          isCorrect={true}
+          isCorrect={isSolvedCorrectly}
           selectedLetter={lastAnswer?.selected_letter || selectedLetter}
           srsItem={srsItem}
           onRateSRS={onRateSRS}
